@@ -34,7 +34,7 @@ def main():
     # Initialize standard Weights and Biases project
     wandb.init(
         project="murmur_rl",
-        name="ppo_continuous_run_cuda_fast1",
+        name="erl_continuous_run_cuda_fast1",
         config=config,
         mode="online"
     )
@@ -60,9 +60,21 @@ def main():
     env.physics.max_turn_angle = config["max_turn_angle"]
     env.physics.max_force = config["max_force"]
     
-    # --- 3. Initialize Shared Brain ---
+    # --- 3. Initialize Shared Brain(s) via ERL Population ---
+    from murmur_rl.training.evolution import ERLPopulation
+    
     obs_dim = 16
-    brain = StarlingBrain(obs_dim=obs_dim, action_dim=3, hidden_size=64)
+    erl_pop_size = 5
+    population = ERLPopulation(
+        num_agents=erl_pop_size, 
+        obs_dim=obs_dim, 
+        action_dim=3, 
+        hidden_size=64, 
+        device=device
+    )
+    
+    # The RL brain is conventionally agent 0
+    brain = population.agents[0]
     
     # --- 3b. PyTorch-level optimizations ---
     # TF32 for CUDA (uses Tensor Cores for ~2x matmul throughput, negligible precision loss)
@@ -141,6 +153,22 @@ def main():
             "biology/mean_predator_distance": actual_predator_dist,
             "biology/mean_social_neighbors": actual_social_neighbors,
         })
+        
+        # --- Evolutionary Step ---
+        if epoch % 5 == 0:
+            fitness_scores = population.evaluate(env, max_steps=config["rollout_steps"])
+            
+            synced, best_ga_idx = population.sync_from_ga(fitness_scores, rl_idx=0, threshold=1.2)
+            if synced:
+                print(f"  [ERL] Synced RL brain with better GA brain {best_ga_idx} (fitness: {fitness_scores[best_ga_idx]:.1f} vs RL: {fitness_scores[0]:.1f})")
+                
+            population.evolve(fitness_scores, elite_count=2, mutation_power=0.01)
+            
+            wandb.log({
+                "erl/rl_fitness": fitness_scores[0].item(),
+                "erl/best_ga_fitness": fitness_scores.max().item(),
+                "erl/mean_population_fitness": fitness_scores.mean().item(),
+            }, commit=False)
         
         if epoch % 50 == 0 or epoch == 1:
             print(f"Epoch {epoch:04d} | Ret: {mean_return:>7.4f} | Ent: {entropy:>6.4f} | VLoss: {v_loss:>7.4f} | Ploss: {pg_loss:>7.4f} | EvasionDist: {actual_predator_dist:>5.1f}m | Cohort: {actual_social_neighbors:>4.1f}")
