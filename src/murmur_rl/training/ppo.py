@@ -5,7 +5,7 @@ import numpy as np
 
 class PPOTrainer:
     """
-    Proximal Policy Optimization (PPO) loop for Parameter-Shared Multi-Agent RL.
+    Proximal Policy Optimization (PPO) loop for Parameter-Shared Independent PPO (IPPO).
     Every starling shares the same network weights, meaning we pool their 
     experiences together to train the central brain.
     """
@@ -58,8 +58,13 @@ class PPOTrainer:
             if not agent_keys:
                 break
                 
-            # Convert to bulk tensor
-            obs_tensor = torch.tensor(np.array(list(obs.values())), dtype=torch.float32, device=self.device)
+            # Convert to bulk tensor with strict alphabetical ordering to prevent identity mixups
+            # obs_dim = 16
+            obs_array = np.zeros((len(self.env.possible_agents), 16))
+            for i, agent in enumerate(self.env.possible_agents):
+                if agent in obs:
+                    obs_array[i] = obs[agent]
+            obs_tensor = torch.tensor(obs_array, dtype=torch.float32, device=self.device)
             
             with torch.no_grad():
                 action, logprob, _, value = self.brain.get_action_and_value(obs_tensor)
@@ -76,8 +81,17 @@ class PPOTrainer:
             b_actions.append(action)
             b_logprobs.append(logprob)
             
-            reward_tensor = torch.tensor(np.array(list(rewards.values())), dtype=torch.float32, device=self.device)
-            done_tensor = torch.tensor(np.array(list(dones.values())), dtype=torch.float32, device=self.device)
+            # Strictly ordered rewards and dones arrays
+            rew_array = np.zeros(len(self.env.possible_agents))
+            done_array = np.zeros(len(self.env.possible_agents))
+            for i, agent in enumerate(self.env.possible_agents):
+                if agent in rewards:
+                    rew_array[i] = rewards[agent]
+                if agent in dones:
+                    done_array[i] = dones[agent]
+                    
+            reward_tensor = torch.tensor(rew_array, dtype=torch.float32, device=self.device)
+            done_tensor = torch.tensor(done_array, dtype=torch.float32, device=self.device)
             
             b_rewards.append(reward_tensor)
             b_dones.append(done_tensor)
@@ -105,7 +119,11 @@ class PPOTrainer:
         # Bootstrap value for next step
         final_obs = rollouts["final_obs"]
         if final_obs:
-            final_tensor = torch.tensor(np.array(list(final_obs.values())), dtype=torch.float32, device=self.device)
+            final_obs_array = np.zeros((len(self.env.possible_agents), 16))
+            for i, agent in enumerate(self.env.possible_agents):
+                if agent in final_obs:
+                    final_obs_array[i] = final_obs[agent]
+            final_tensor = torch.tensor(final_obs_array, dtype=torch.float32, device=self.device)
             with torch.no_grad():
                 _, _, _, next_value = self.brain.get_action_and_value(final_tensor)
                 next_value = next_value.flatten()
@@ -162,8 +180,14 @@ class PPOTrainer:
         # Check if we have enough data for batch size, otherwise lower it
         batch_size = min(self.batch_size, batch_size_total)
         
+        # Accumulate metrics across minibatches for logging
+        epoch_pg_losses = []
+        epoch_v_losses = []
+        epoch_entropies = []
+        
         for epoch in range(self.update_epochs):
             np.random.shuffle(inds)
+            approx_kl_divs = []
             
             for start in range(0, batch_size_total, batch_size):
                 end = start + batch_size
@@ -188,8 +212,10 @@ class PPOTrainer:
                 # Value Loss
                 v_loss = 0.5 * ((newvalue.flatten() - mini_returns) ** 2).mean()
                 
-                # Entropy Loss
-                entropy_loss = entropy.mean()
+                # Calculate approximate KL divergence for early stopping
+                with torch.no_grad():
+                    approx_kl = ((ratio - 1.0) - logratio).mean()
+                approx_kl_divs.append(approx_kl.item())
                 
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                 
@@ -198,4 +224,15 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.brain.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 
-        return pg_loss.item(), v_loss.item(), entropy_loss.item(), mb_returns.mean().item()
+                # Store minibatch metrics
+                epoch_pg_losses.append(pg_loss.item())
+                epoch_v_losses.append(v_loss.item())
+                epoch_entropies.append(entropy_loss.item())
+                
+            # Early stopping at epoch level
+            if np.mean(approx_kl_divs) > self.target_kl:
+                print(f"Early stopping at epoch {epoch} due to reaching max KL.")
+                break
+                
+        # Return MEAN losses across all minibatches, not just the very last one
+        return np.mean(epoch_pg_losses), np.mean(epoch_v_losses), np.mean(epoch_entropies), mb_returns.mean().item()

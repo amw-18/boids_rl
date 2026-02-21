@@ -1,4 +1,5 @@
 import os
+import gc
 import torch
 import numpy as np
 import wandb
@@ -117,6 +118,14 @@ def main():
             chkpt_path = f"checkpoints/starling_brain_ep{epoch}.pth"
             torch.save(brain.state_dict(), chkpt_path)
             print(f"Saved Checkpoint: {chkpt_path}")
+            
+        # Explicit Memory Management for Apple Silicon
+        # MPS aggressively caches tensor allocations, which looks like a giant RAM leak
+        # over thousands of epochs if not manually cleared.
+        del rollouts
+        gc.collect()
+        if device_name == 'mps':
+            torch.mps.empty_cache()
             
     wandb.finish()
     print("Training Complete. Final model saved.")
