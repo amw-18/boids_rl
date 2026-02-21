@@ -186,4 +186,4 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.brain.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 
-        return pg_loss.item(), v_loss.item(), b_returns.mean().item()
+        return pg_loss.item(), v_loss.item(), entropy_loss.item(), b_returns.mean().item()

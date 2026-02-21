@@ -104,8 +104,9 @@ class MurmurationEnv(ParallelEnv):
         action_list = [actions[agent] for agent in self.possible_agents]
         action_tensor = torch.tensor(np.array(action_list), dtype=torch.float32, device=self.device)
         
-        # Scale actions to max force
-        # Assuming physics max_force internally limits it, we just pass the vector
+        # Scale normalized actions [-1, 1] to max force bounds
+        action_tensor = action_tensor * self.physics.max_force
+        
         self.physics.step(actions=action_tensor)
         
         self.num_moves += 1
@@ -140,11 +141,12 @@ class MurmurationEnv(ParallelEnv):
         dist_matrix.masked_fill_(~alive.unsqueeze(0), float('inf'))
         
         # === Group Context ===
-        # 1. Nearest Dist
+        # 1. Nearest Dist (Normalized 0-1)
         nearest_dist, _ = torch.min(dist_matrix, dim=1, keepdim=True) # (N, 1)
         nearest_dist.masked_fill_(nearest_dist == float('inf'), self.perception_radius) # If alone, assume far
+        nearest_dist = nearest_dist / self.perception_radius
         
-        # 2. Local Density (num within radius)
+        # 2. Local Density (num within radius) (Already Normalized 0-1)
         in_radius_mask = dist_matrix < self.perception_radius # (N, N)
         local_density = in_radius_mask.sum(dim=1, keepdim=True).float() # (N, 1)
         local_density = local_density / self.n_agents # Normalize 0-1
@@ -179,36 +181,45 @@ class MurmurationEnv(ParallelEnv):
         dx = predator_pos - pos # (N, 3)
         dv = predator_vel - vel # (N, 3)
         
-        # 1. Distance d
+        # 1. Distance d (Normalized 0-1 based on half space size)
         d = torch.norm(dx, dim=-1, keepdim=True) # (N, 1)
+        d_norm = torch.clamp(d / (self.space_size / 2.0), max=1.0)
         
         # 2. Unit direction
         u = dx / d.clamp(min=1e-5) # (N, 3)
         
-        # 3. Closing Speed (v_close)
-        # -dot(dv, u)
+        # 3. Closing Speed (v_close) (Normalized -1 to 1)
+        # Max closing speed is roughly predator_speed + base_speed
         v_close = -torch.sum(dv * u, dim=-1, keepdim=True) # (N, 1)
+        max_v_close = self.physics.predator_speed + self.physics.base_speed
+        v_close_norm = torch.clamp(v_close / max_v_close, min=-1.0, max=1.0)
         
-        # 4. Looming (Time-to-collision proxy)
+        # 4. Looming (Time-to-collision proxy) (Normalized/Clamped)
+        # v_close / d can explode if d is tiny. We clamp it realistically.
         loom = v_close / d.clamp(min=1e-5) # (N, 1)
+        loom_norm = torch.clamp(loom, min=-5.0, max=5.0) / 5.0 # pseudo-normalized [-1, 1]
         
-        # 5. Bearing (in_front)
+        # 5. Bearing (in_front) (Already Normalized -1 to 1 from dot product)
         # dot(self_vel_unit, u)
         self_vel_unit = vel / (torch.norm(vel, dim=-1, keepdim=True).clamp(min=1e-5))
         in_front = torch.sum(self_vel_unit * u, dim=-1, keepdim=True) # (N, 1)
         
         # Mask threats if far away (visual radius)
         threat_mask = d > (self.space_size / 2.0)
-        v_close.masked_fill_(threat_mask, 0.0)
-        loom.masked_fill_(threat_mask, 0.0)
+        v_close_norm.masked_fill_(threat_mask, 0.0)
+        loom_norm.masked_fill_(threat_mask, 0.0)
         in_front.masked_fill_(threat_mask, 0.0)
         
         # === Bounds ===
-        # Distance to closest wall
+        # Distance to closest wall (Normalized 0-1)
         dist_to_bounds_x = torch.min(pos[:, 0], self.space_size - pos[:, 0]).unsqueeze(1)
         dist_to_bounds_y = torch.min(pos[:, 1], self.space_size - pos[:, 1]).unsqueeze(1)
         dist_to_bounds_z = torch.min(pos[:, 2], self.space_size - pos[:, 2]).unsqueeze(1)
         closest_wall = torch.min(torch.cat([dist_to_bounds_x, dist_to_bounds_y, dist_to_bounds_z], dim=1), dim=1, keepdim=True)[0]
+        closest_wall_norm = torch.clamp(closest_wall / (self.space_size / 2.0), max=1.0)
+        
+        # Normalize self velocity [-1, 1]
+        vel_norm = vel / self.physics.base_speed
         
         # Package for agents
         for i, agent in enumerate(self.possible_agents):
@@ -220,16 +231,16 @@ class MurmurationEnv(ParallelEnv):
                 continue
                 
             obs = torch.cat([
-                vel[i],                    # 3
+                vel_norm[i],               # 3
                 nearest_dist[i],           # 1
                 local_density[i],          # 1
                 local_alignment[i],        # 3
                 com_direction[i],          # 3
-                d[i],                      # 1
-                v_close[i],                # 1
-                loom[i],                   # 1
+                d_norm[i],                 # 1
+                v_close_norm[i],           # 1
+                loom_norm[i],              # 1
                 in_front[i],               # 1
-                closest_wall[i]            # 1
+                closest_wall_norm[i]       # 1
             ]).cpu().numpy()
             
             obs_dict[agent] = obs

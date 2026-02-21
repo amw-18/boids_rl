@@ -18,7 +18,8 @@ class BoidsVisualizer3D:
             space_size=space_size,
             device=self.device,
             perception_radius=15.0,
-            max_speed=2.0,
+            base_speed=2.0,
+            max_turn_angle=0.5,
             max_force=0.1
         )
         

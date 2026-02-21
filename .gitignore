@@ -11,3 +11,4 @@ wheels/
 
 # Editor stuff
 .agents/**
+wandb/**
