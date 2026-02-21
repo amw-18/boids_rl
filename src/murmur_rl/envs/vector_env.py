@@ -2,6 +2,16 @@ import torch
 
 from murmur_rl.envs.physics import BoidsPhysics
 
+# Detect best torch.compile mode at import time.
+# On CUDA, the inductor backend requires Triton for kernel codegen.
+# On CPU, the C++ codegen backend works without Triton.
+_HAS_TRITON = False
+try:
+    import triton  # noqa: F401
+    _HAS_TRITON = True
+except ImportError:
+    pass
+
 
 class VectorMurmurationEnv:
     """
@@ -37,6 +47,17 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.max_steps = 500
 
+        # Pre-compute constants as on-device tensors so compiled code
+        # doesn't re-create them on every call
+        self._perception_r = torch.tensor(perception_radius, device=self.device)
+        self._half_space = torch.tensor(space_size / 2.0, device=self.device)
+        self._death_penalty = torch.tensor(-100.0, device=self.device)
+        self._zero = torch.tensor(0.0, device=self.device)
+        self._inf = torch.tensor(float("inf"), device=self.device)
+
+        # Diagonal mask for cdist — avoids in-place fill_diagonal_ which breaks torch.compile
+        self._diag_mask = torch.eye(num_agents, dtype=torch.bool, device=self.device)
+
         # Track which agents have died (persistent across the episode)
         self._dead_mask = torch.zeros(
             num_agents, dtype=torch.bool, device=self.device
@@ -45,6 +66,28 @@ class VectorMurmurationEnv:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def compile(self):
+        """Wrap hot methods with torch.compile for kernel fusion.
+        Call once after construction, before the training loop.
+        """
+        # CUDA inductor requires Triton; CPU can use C++ codegen (default).
+        if self.device.type == "cuda" and not _HAS_TRITON:
+            print("  env compile skipped (CUDA requires Triton, not installed)")
+            return self
+
+        mode = "reduce-overhead" if _HAS_TRITON else "default"
+        try:
+            self._get_observations = torch.compile(
+                self._get_observations, mode=mode
+            )
+            self._get_rewards = torch.compile(
+                self._get_rewards, mode=mode
+            )
+            print(f"  env compiled (mode={mode})")
+        except Exception as e:
+            print(f"  env compile skipped ({e})")
+        return self
 
     def reset(self):
         self.num_moves = 0
@@ -90,10 +133,11 @@ class VectorMurmurationEnv:
         vel = self.physics.velocities         # (N, 3)
         alive = self.physics.alive_mask       # (N,)
 
-        # --- Pairwise distances (shared with rewards) ---
+        # --- Pairwise distances — compile-friendly (no in-place ops) ---
         dist_matrix = torch.cdist(pos, pos)   # (N, N)
-        dist_matrix.fill_diagonal_(float("inf"))
-        dist_matrix.masked_fill_(~alive.unsqueeze(0), float("inf"))
+        # Replace diagonal + dead-agent entries with inf via torch.where
+        mask_out = self._diag_mask | ~alive.unsqueeze(0)  # (N, N)
+        dist_matrix = torch.where(mask_out, self._inf, dist_matrix)
 
         # === Group Context ===
 
@@ -101,7 +145,7 @@ class VectorMurmurationEnv:
         nearest_dist = dist_matrix.min(dim=1, keepdim=True).values
         nearest_dist = torch.where(
             nearest_dist == float("inf"),
-            torch.tensor(self.perception_radius, device=self.device),
+            self._perception_r,
             nearest_dist,
         )
         nearest_dist = nearest_dist / self.perception_radius
@@ -152,10 +196,10 @@ class VectorMurmurationEnv:
         in_front = (vel_unit * u).sum(dim=-1, keepdim=True)     # (N, 1)
 
         # Mask far threats
-        far = d > (self.space_size / 2.0)
-        v_close_norm = v_close_norm.masked_fill(far, 0.0)
-        loom_norm = loom_norm.masked_fill(far, 0.0)
-        in_front = in_front.masked_fill(far, 0.0)
+        far = d > self._half_space
+        v_close_norm = torch.where(far, self._zero, v_close_norm)
+        loom_norm = torch.where(far, self._zero, loom_norm)
+        in_front = torch.where(far, self._zero, in_front)
 
         # === Boundary ===
         dist_lo = pos                                           # (N, 3)
@@ -195,9 +239,9 @@ class VectorMurmurationEnv:
         pos = self.physics.positions
         alive = self.physics.alive_mask
 
-        # Pairwise distances
+        # Pairwise distances — compile-friendly
         dist_matrix = torch.cdist(pos, pos)
-        dist_matrix.fill_diagonal_(float("inf"))
+        dist_matrix = torch.where(self._diag_mask, self._inf, dist_matrix)
 
         nearest_dist = dist_matrix.min(dim=1).values
 
@@ -234,9 +278,9 @@ class VectorMurmurationEnv:
         rewards -= 2.0 * collision_count
 
         # Death penalty overrides everything
-        rewards = torch.where(new_deaths, torch.tensor(-100.0, device=self.device), rewards)
+        rewards = torch.where(new_deaths, self._death_penalty, rewards)
 
         # Already-dead agents get 0
-        rewards = torch.where(self._dead_mask, torch.tensor(0.0, device=self.device), rewards)
+        rewards = torch.where(self._dead_mask, self._zero, rewards)
 
         return rewards, new_deaths
