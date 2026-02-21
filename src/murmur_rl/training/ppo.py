@@ -85,14 +85,12 @@ class PPOTrainer:
             
             obs = next_obs
             
-        # Return bulk tensors (Num_steps x Num_agents, Dim)
-        # Assuming num_agents stays mostly constant or we pad/mask (PettingZoo can drop agents)
-        # For simplicity in this env, no agents die, they just truncate at 500 steps.
+        # Return bulk tensors (Num_steps, Num_agents, Dim)
         return {
-            "obs": torch.cat(b_obs),
-            "actions": torch.cat(b_actions),
-            "logprobs": torch.cat(b_logprobs),
-            "rewards": torch.stack(b_rewards), # keeps steps separate for GAE
+            "obs": torch.stack(b_obs),
+            "actions": torch.stack(b_actions),
+            "logprobs": torch.stack(b_logprobs),
+            "rewards": torch.stack(b_rewards), 
             "dones": torch.stack(b_dones),
             "values": torch.stack(b_values),
             "final_obs": next_obs
@@ -130,7 +128,7 @@ class PPOTrainer:
             advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
             
         returns = advantages + values
-        return advantages.flatten(), returns.flatten()
+        return advantages, returns
 
     def train_step(self, rollouts):
         b_obs = rollouts["obs"]
@@ -139,13 +137,26 @@ class PPOTrainer:
         
         b_advantages, b_returns = self.compute_advantages(rollouts)
         
-        # Flatten all batches: (Steps * Agents, Dim)
-        b_values = rollouts["values"].flatten()
+        b_dones = rollouts["dones"]
+        num_steps, num_agents = b_dones.shape
         
-        # Normalize advantages
-        b_advantages = (b_advantages - b_advantages.mean()) / (b_advantages.std() + 1e-8)
+        # Create a valid_mask indicating if an agent is physically alive at step t.
+        # If an agent died at t-1 (dones[t-1] == True), the transition at t is a dead dummy frame.
+        valid_mask = torch.ones((num_steps, num_agents), dtype=torch.bool, device=self.device)
+        valid_mask[1:] = ~b_dones[:-1].bool()
         
-        batch_size_total = b_obs.shape[0]
+        # Flatten all batches using the validity mask to discard padding
+        mb_obs = b_obs[valid_mask]
+        mb_actions = b_actions[valid_mask]
+        mb_logprobs = b_logprobs[valid_mask]
+        
+        mb_advantages = b_advantages[valid_mask]
+        mb_returns = b_returns[valid_mask]
+        
+        # Normalize advantages based ONLY on valid active transitions
+        mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+        
+        batch_size_total = mb_obs.shape[0]
         inds = np.arange(batch_size_total)
         
         # Check if we have enough data for batch size, otherwise lower it
@@ -158,23 +169,24 @@ class PPOTrainer:
                 end = start + batch_size
                 mb_inds = inds[start:end]
                 
-                mb_obs = b_obs[mb_inds]
-                mb_actions = b_actions[mb_inds]
-                mb_advantages = b_advantages[mb_inds]
-                mb_returns = b_returns[mb_inds]
-                mb_logprobs = b_logprobs[mb_inds]
+                # Fetch mini-batch data
+                mini_obs = mb_obs[mb_inds]
+                mini_actions = mb_actions[mb_inds]
+                mini_advantages = mb_advantages[mb_inds]
+                mini_returns = mb_returns[mb_inds]
+                mini_logprobs = mb_logprobs[mb_inds]
                 
-                _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mb_obs, mb_actions)
-                logratio = newlogprob - mb_logprobs
+                _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mini_obs, mini_actions)
+                logratio = newlogprob - mini_logprobs
                 ratio = logratio.exp()
                 
                 # Policy Loss
-                pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
+                pg_loss1 = -mini_advantages * ratio
+                pg_loss2 = -mini_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
                 
                 # Value Loss
-                v_loss = 0.5 * ((newvalue.flatten() - mb_returns) ** 2).mean()
+                v_loss = 0.5 * ((newvalue.flatten() - mini_returns) ** 2).mean()
                 
                 # Entropy Loss
                 entropy_loss = entropy.mean()
@@ -186,4 +198,4 @@ class PPOTrainer:
                 nn.utils.clip_grad_norm_(self.brain.parameters(), self.max_grad_norm)
                 self.optimizer.step()
                 
-        return pg_loss.item(), v_loss.item(), entropy_loss.item(), b_returns.mean().item()
+        return pg_loss.item(), v_loss.item(), entropy_loss.item(), mb_returns.mean().item()

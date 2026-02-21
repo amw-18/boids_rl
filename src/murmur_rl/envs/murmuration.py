@@ -84,10 +84,11 @@ class MurmurationEnv(ParallelEnv):
         self.agents = self.possible_agents[:]
         self.num_moves = 0
         self.physics.reset() # Reset positions and velocities on GPU
+        self.dead_agents = set() # Track who is newly dead
         
         # Generate initial observations
         observations = self._get_observations()
-        infos = {agent: {} for agent in self.agents}
+        infos = {agent: {} for agent in self.possible_agents}
         
         return observations, infos
 
@@ -100,8 +101,8 @@ class MurmurationEnv(ParallelEnv):
             return {}, {}, {}, {}, {}
 
         # Convert dictionary of actions to PyTorch tensor
-        # Assumes actions keys are ordered same as self.agents
-        action_list = [actions[agent] for agent in self.possible_agents]
+        # Map over possible_agents directly to preserve shape N
+        action_list = [actions.get(agent, np.zeros(3)) for agent in self.possible_agents]
         action_tensor = torch.tensor(np.array(action_list), dtype=torch.float32, device=self.device)
         
         # Scale normalized actions [-1, 1] to max force bounds
@@ -117,9 +118,9 @@ class MurmurationEnv(ParallelEnv):
         
         # Truncate after 500 steps
         env_truncation = self.num_moves >= 500
-        truncations = {agent: env_truncation for agent in self.agents}
-        terminations = {agent: False for agent in self.agents}
-        infos = {agent: {} for agent in self.agents}
+        truncations = {agent: env_truncation for agent in self.possible_agents}
+        terminations = {agent: (agent in self.dead_agents) for agent in self.possible_agents}
+        infos = {agent: {} for agent in self.possible_agents}
 
         if env_truncation:
             self.agents = []
@@ -221,14 +222,8 @@ class MurmurationEnv(ParallelEnv):
         # Normalize self velocity [-1, 1]
         vel_norm = vel / self.physics.base_speed
         
-        # Package for agents
+        # Package for all agents identically so shapes NEVER change
         for i, agent in enumerate(self.possible_agents):
-            if not alive[i]:
-                # Agent is dead, PettingZoo expects us to remove it from `self.agents` 
-                # and NOT return observation for it next step. Handled in step().
-                if agent in self.agents:
-                    self.agents.remove(agent)
-                continue
                 
             obs = torch.cat([
                 vel_norm[i],               # 3
@@ -278,21 +273,23 @@ class MurmurationEnv(ParallelEnv):
         hit_wall = (pos < margin).any(dim=1) | (pos > (self.space_size - margin)).any(dim=1)
         
         for i, agent in enumerate(self.possible_agents):
-            # Only give reward if agent was alive in step
-            if agent not in self.agents:
+            if agent in self.dead_agents:
+                 # Already processed the death in a previous frame
+                 rewards[agent] = 0.0
                  continue
             
-            # If agent just died (not alive now, but was in self.agents)
             if not alive[i]:
-                # Death by predator
+                # Death by predator: First time seeing it dead
                 rewards[agent] = -100.0
+                self.dead_agents.add(agent)
                 continue
                 
             if hit_wall[i]:
                 # Death by wall
                 rewards[agent] = -100.0
-                # Technically should kill them here, but env truncation will handle it 
-                # or next step will freeze them.
+                self.dead_agents.add(agent)
+                # Manually kill physical velocity so it stops forever
+                self.physics.alive_mask[i] = False
                 continue
                 
             # Stay alive base reward
