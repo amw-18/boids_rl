@@ -34,7 +34,7 @@ def main():
     # Initialize standard Weights and Biases project
     wandb.init(
         project="murmur_rl",
-        name="ppo_continuous_run_cuda_fast",
+        name="ppo_continuous_run_cuda_fast1",
         config=config,
         mode="online"
     )

@@ -77,7 +77,7 @@ class VectorMurmurationEnv:
         if truncated:
             dones = torch.ones(self.n_agents, dtype=torch.bool, device=self.device)
         else:
-            dones = new_deaths
+            dones = self._dead_mask.clone()
 
         return obs, rewards, dones
 

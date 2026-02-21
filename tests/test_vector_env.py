@@ -114,6 +114,44 @@ def test_multi_step():
     print("test_multi_step: PASSED ✓")
 
 
+def test_dones_persistence():
+    """Vectorised env should return True for dones persistently for already dead agents, matching PettingZoo."""
+    N = 10
+    device = "cpu"
+
+    vec_env = VectorMurmurationEnv(num_agents=N, device=device)
+    pz_env = MurmurationEnv(num_agents=N, device=device)
+
+    vec_env.reset()
+    pz_env.reset()
+    
+    # Force agent 0 to die by giving it a position outside the bounds
+    vec_env.physics.positions[0] = torch.tensor([500.0, 500.0, 500.0])
+    _sync_envs(vec_env, pz_env)
+    
+    actions = torch.zeros(N, 3)
+    
+    # Step 1: agent 0 dies
+    _, vec_rewards_1, vec_dones_1 = vec_env.step(actions)
+    pz_obs_1, pz_rewards_1, pz_terms_1, pz_truncs_1, _ = pz_env.step({f"starling_{i}": actions[i].numpy() for i in range(N)})
+    
+    # Step 2: agent 0 is ALREADY dead
+    _, vec_rewards_2, vec_dones_2 = vec_env.step(actions)
+    pz_obs_2, pz_rewards_2, pz_terms_2, pz_truncs_2, _ = pz_env.step({f"starling_{i}": actions[i].numpy() for i in range(N)})
+    
+    # Check if vector env matches PettingZoo behavior
+    assert pz_terms_1["starling_0"] == True, "PettingZoo agent 0 should die step 1"
+    assert pz_terms_2["starling_0"] == True, "PettingZoo agent 0 should still be dead step 2"
+    
+    assert vec_dones_1[0].item() == True, "Vector env agent 0 should die step 1"
+    if vec_dones_2[0].item() != True:
+        print(f"test_dones_persistence: FAILED ✗  (vec_dones[0] became {vec_dones_2[0].item()} on step 2, expected True)")
+        sys.exit(1)
+        
+    print("test_dones_persistence: PASSED ✓")
+
+
+
 # ------------------------------------------------------------------ #
 # Benchmark — old vs new
 # ------------------------------------------------------------------ #
@@ -171,4 +209,5 @@ if __name__ == "__main__":
         test_observations_match()
         test_rewards_match()
         test_multi_step()
+        test_dones_persistence()
         print("\nAll correctness tests done.")
