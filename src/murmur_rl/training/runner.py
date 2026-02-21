@@ -1,13 +1,11 @@
 import os
 import gc
 import torch
-import numpy as np
 import wandb
 
-from murmur_rl.envs.murmuration import MurmurationEnv
+from murmur_rl.envs.vector_env import VectorMurmurationEnv
 from murmur_rl.agents.starling import StarlingBrain
 from murmur_rl.training.ppo import PPOTrainer
-from murmur_rl.utils.render import BoidsVisualizer3D
 
 def main():
     # --- 1. Hyperparameter Configuration ---
@@ -36,9 +34,9 @@ def main():
     # Initialize standard Weights and Biases project
     wandb.init(
         project="murmur_rl",
-        name="ppo_continuous_run_cuda",
+        name="ppo_continuous_run_cuda_fast1",
         config=config,
-        mode="online"  # Disabled so it doesn't crash on unauthenticated local machines
+        mode="online"
     )
 
     device_name = "cpu"
@@ -50,11 +48,11 @@ def main():
     print(f"Starting training on {device}...")
 
     # --- 2. Initialize Vectorized Environment ---
-    env = MurmurationEnv(
+    env = VectorMurmurationEnv(
         num_agents=config["num_agents"],
         space_size=config["space_size"],
         perception_radius=config["perception_radius"],
-        device=device_name
+        device=device_name,
     )
     
     # Override physics engine with new biological limits from config
@@ -79,26 +77,37 @@ def main():
         vf_coef=config["vf_coef"],
         max_grad_norm=config["max_grad_norm"],
         update_epochs=config["update_epochs"],
-        batch_size=config["batch_size"]
+        batch_size=config["batch_size"],
     )
     
     os.makedirs("checkpoints", exist_ok=True)
     
     # --- 5. Training Loop ---
+    # Observation column indices (from VectorMurmurationEnv._get_observations concat order):
+    #  0-2: vel_norm (3)  |  3: nearest_dist (1)  |  4: local_density (1)
+    #  5-7: local_alignment (3)  |  8-10: com_direction (3)
+    #  11: d_norm (1)  |  12: v_close_norm (1)  |  13: loom_norm (1)
+    #  14: in_front (1)  |  15: closest_wall_norm (1)
+    COL_PREDATOR_DIST = 11
+    COL_LOCAL_DENSITY = 4
+
     for epoch in range(1, config["num_epochs"] + 1):
         
         # Collect experiences
         rollouts = trainer.collect_rollouts(num_steps=config["rollout_steps"])
         
-        # Calculate custom biological metrics
-        # Mean distance to predator at the end of rollout
-        # Threat dist is input dim 5, normalized by (space_size/2)
-        mean_predator_dist_norm = rollouts["obs"][:, 5].mean().item()
+        # Calculate custom biological metrics from the tensor buffer (steps, N, 16)
+        mean_predator_dist_norm = rollouts["obs"][:, :, COL_PREDATOR_DIST].mean().item()
         actual_predator_dist = mean_predator_dist_norm * (config["space_size"] / 2.0)
         
-        # Mean local density is input dim 2, normalized by n_agents
-        mean_local_density_norm = rollouts["obs"][:, 2].mean().item()
+        mean_local_density_norm = rollouts["obs"][:, :, COL_LOCAL_DENSITY].mean().item()
         actual_social_neighbors = mean_local_density_norm * config["num_agents"]
+        
+        # Linearly decay entropy coefficient over time to encourage convergence
+        # Decay to 0.0 by epoch 1000
+        progress = min(1.0, (epoch - 1) / 1000.0)
+        current_ent_coef = config["ent_coef"] * (1.0 - progress)
+        trainer.ent_coef = current_ent_coef
         
         # Train PPO
         pg_loss, v_loss, entropy, mean_return = trainer.train_step(rollouts)

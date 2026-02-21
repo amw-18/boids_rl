@@ -43,108 +43,73 @@ class PPOTrainer:
 
     def collect_rollouts(self, num_steps=200):
         """
-        Run the environment for `num_steps`, collecting observations, actions, 
-        log_probs, rewards, and values for all active agents.
+        Run the environment for `num_steps`, collecting (obs, actions,
+        log_probs, rewards, values) as on-device tensors — no dicts, no numpy.
         """
-        obs, _ = self.env.reset()
-        
-        # Buffers
-        b_obs, b_actions, b_logprobs = [], [], []
-        b_rewards, b_dones, b_values = [], [], []
-        
+        obs = self.env.reset()                      # (N, 16) tensor on device
+
+        # Pre-allocate buffers
+        N = self.env.n_agents
+        b_obs      = torch.empty((num_steps, N, self.env.obs_dim), device=self.device)
+        b_actions  = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
+        b_logprobs = torch.empty((num_steps, N), device=self.device)
+        b_rewards  = torch.empty((num_steps, N), device=self.device)
+        b_dones    = torch.empty((num_steps, N), device=self.device)
+        b_values   = torch.empty((num_steps, N), device=self.device)
+
         for step in range(num_steps):
-            # Dict mapping agent to obs
-            agent_keys = list(obs.keys())
-            if not agent_keys:
-                break
-                
-            # Convert to bulk tensor with strict alphabetical ordering to prevent identity mixups
-            # obs_dim = 16
-            obs_array = np.zeros((len(self.env.possible_agents), 16))
-            for i, agent in enumerate(self.env.possible_agents):
-                if agent in obs:
-                    obs_array[i] = obs[agent]
-            obs_tensor = torch.tensor(obs_array, dtype=torch.float32, device=self.device)
-            
+            b_obs[step] = obs
+
             with torch.no_grad():
-                action, logprob, _, value = self.brain.get_action_and_value(obs_tensor)
-            
-            # Step env
-            action_np = action.cpu().numpy()
-            actions_dict = {k: action_np[i] for i, k in enumerate(agent_keys)}
-            
-            next_obs, rewards, term, trunc, _ = self.env.step(actions_dict)
-            dones = {k: term[k] or trunc[k] for k in term}
-            
-            # Store data
-            b_obs.append(obs_tensor)
-            b_actions.append(action)
-            b_logprobs.append(logprob)
-            
-            # Strictly ordered rewards and dones arrays
-            rew_array = np.zeros(len(self.env.possible_agents))
-            done_array = np.zeros(len(self.env.possible_agents))
-            for i, agent in enumerate(self.env.possible_agents):
-                if agent in rewards:
-                    rew_array[i] = rewards[agent]
-                if agent in dones:
-                    done_array[i] = dones[agent]
-                    
-            reward_tensor = torch.tensor(rew_array, dtype=torch.float32, device=self.device)
-            done_tensor = torch.tensor(done_array, dtype=torch.float32, device=self.device)
-            
-            b_rewards.append(reward_tensor)
-            b_dones.append(done_tensor)
-            b_values.append(value.flatten())
-            
+                action, logprob, _, value = self.brain.get_action_and_value(obs)
+
+            next_obs, rewards, dones = self.env.step(action)
+
+            b_actions[step]  = action
+            b_logprobs[step] = logprob
+            b_rewards[step]  = rewards
+            b_dones[step]    = dones.float()
+            b_values[step]   = value.flatten()
+
             obs = next_obs
-            
-        # Return bulk tensors (Num_steps, Num_agents, Dim)
+
         return {
-            "obs": torch.stack(b_obs),
-            "actions": torch.stack(b_actions),
-            "logprobs": torch.stack(b_logprobs),
-            "rewards": torch.stack(b_rewards), 
-            "dones": torch.stack(b_dones),
-            "values": torch.stack(b_values),
-            "final_obs": next_obs
+            "obs":      b_obs,
+            "actions":  b_actions,
+            "logprobs": b_logprobs,
+            "rewards":  b_rewards,
+            "dones":    b_dones,
+            "values":   b_values,
+            "final_obs": obs,               # (N, 16) tensor
         }
 
     def compute_advantages(self, rollouts):
         """Generalized Advantage Estimation (GAE) across all agents simultaneously."""
         rewards = rollouts["rewards"]
-        dones = rollouts["dones"]
-        values = rollouts["values"]
-        
+        dones   = rollouts["dones"]
+        values  = rollouts["values"]
+
         # Bootstrap value for next step
-        final_obs = rollouts["final_obs"]
-        if final_obs:
-            final_obs_array = np.zeros((len(self.env.possible_agents), 16))
-            for i, agent in enumerate(self.env.possible_agents):
-                if agent in final_obs:
-                    final_obs_array[i] = final_obs[agent]
-            final_tensor = torch.tensor(final_obs_array, dtype=torch.float32, device=self.device)
-            with torch.no_grad():
-                _, _, _, next_value = self.brain.get_action_and_value(final_tensor)
-                next_value = next_value.flatten()
-        else:
-            next_value = torch.zeros_like(values[-1])
-            
-        advantages = torch.zeros_like(rewards).to(self.device)
+        final_obs = rollouts["final_obs"]   # (N, 16) tensor — always present
+        with torch.no_grad():
+            _, _, _, next_value = self.brain.get_action_and_value(final_obs)
+            next_value = next_value.flatten()
+
+        advantages = torch.zeros_like(rewards)
         lastgaelam = 0
-        
+
         num_steps = len(rewards)
         for t in reversed(range(num_steps)):
             if t == num_steps - 1:
-                nextnonterminal = 1.0 - dones[t]  # assuming terminal dones have 1
+                nextnonterminal = 1.0 - dones[t]
                 nextvalues = next_value
             else:
                 nextnonterminal = 1.0 - dones[t]
                 nextvalues = values[t + 1]
-            
+
             delta = rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
             advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
-            
+
         returns = advantages + values
         return advantages, returns
 
