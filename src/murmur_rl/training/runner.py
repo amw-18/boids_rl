@@ -64,6 +64,25 @@ def main():
     obs_dim = 16
     brain = StarlingBrain(obs_dim=obs_dim, action_dim=3, hidden_size=64)
     
+    # --- 3b. PyTorch-level optimizations ---
+    # TF32 for CUDA (uses Tensor Cores for ~2x matmul throughput, negligible precision loss)
+    if device_name == "cuda":
+        torch.set_float32_matmul_precision("high")
+
+    # torch.compile: fuse small ops into optimized kernels
+    from murmur_rl.envs.vector_env import _HAS_TRITON
+    if device_name == "cuda" and not _HAS_TRITON:
+        print("  brain compile skipped (CUDA requires Triton, not installed)")
+    else:
+        mode = "reduce-overhead" if _HAS_TRITON else "default"
+        try:
+            brain = torch.compile(brain, mode=mode)
+            print(f"  brain compiled (mode={mode})")
+        except Exception as e:
+            print(f"  brain compile skipped ({e})")
+    env.compile()
+    print("torch.compile setup complete")
+
     # --- 4. Initialize PPO Trainer ---
     trainer = PPOTrainer(
         env=env,
