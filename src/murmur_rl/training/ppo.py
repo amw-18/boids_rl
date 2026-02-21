@@ -216,6 +216,8 @@ class PPOTrainer:
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - logratio).mean()
                 approx_kl_divs.append(approx_kl.item())
+
+                entropy_loss = entropy.mean()
                 
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                 

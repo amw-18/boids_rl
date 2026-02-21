@@ -36,12 +36,16 @@ def main():
     # Initialize standard Weights and Biases project
     wandb.init(
         project="murmur_rl",
-        name="ppo_continuous_run_1",
+        name="ppo_continuous_run_cuda",
         config=config,
         mode="online"  # Disabled so it doesn't crash on unauthenticated local machines
     )
 
-    device_name = 'mps' if torch.backends.mps.is_available() else 'cpu'
+    device_name = "cpu"
+    if torch.backends.mps.is_available():
+        device_name = "mps"
+    elif torch.cuda.is_available():
+        device_name = "cuda"
     device = torch.device(device_name)
     print(f"Starting training on {device}...")
 
