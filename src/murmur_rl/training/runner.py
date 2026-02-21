@@ -103,6 +103,12 @@ def main():
         mean_local_density_norm = rollouts["obs"][:, :, COL_LOCAL_DENSITY].mean().item()
         actual_social_neighbors = mean_local_density_norm * config["num_agents"]
         
+        # Linearly decay entropy coefficient over time to encourage convergence
+        # Decay to 0.0 by epoch 1000
+        progress = min(1.0, (epoch - 1) / 1000.0)
+        current_ent_coef = config["ent_coef"] * (1.0 - progress)
+        trainer.ent_coef = current_ent_coef
+        
         # Train PPO
         pg_loss, v_loss, entropy, mean_return = trainer.train_step(rollouts)
         
