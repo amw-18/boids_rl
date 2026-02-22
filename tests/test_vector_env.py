@@ -12,6 +12,7 @@ import numpy as np
 
 from murmur_rl.envs.vector_env import VectorMurmurationEnv
 from murmur_rl.envs.murmuration import MurmurationEnv
+from murmur_rl.agents.starling import StarlingBrain
 
 
 # ------------------------------------------------------------------ #
@@ -150,7 +151,49 @@ def test_dones_persistence():
         
     print("test_dones_persistence: PASSED ✓")
 
+def test_global_state():
+    """Verify the MAPPO global state exact structure and shape."""
+    N = 20
+    device = "cpu"
+    env = VectorMurmurationEnv(num_agents=N, device=device)
+    env.reset()
+    
+    global_state = env.get_global_state()
+    
+    # Expected dimensions
+    # N * 3 (pos) + N * 3 (vel) + 3 (pred_pos) + 3 (pred_vel) + N (alive)
+    expected_dim = (N * 3) + (N * 3) + 3 + 3 + N
+    
+    # It must expand identically across the N agents
+    assert global_state.shape == (N, expected_dim), f"Expected shape {(N, expected_dim)}, got {global_state.shape}"
+    
+    # Verify that agent 0's global state is identical to agent 1's global state
+    assert torch.allclose(global_state[0], global_state[1]), "Global state must be identical across all agents"
+    assert env.global_obs_dim == expected_dim, "Internal environment tracker must match expected dimensions."
+    
+    print("test_global_state: PASSED ✓")
 
+def test_centralized_critic():
+    """Verify that the CTDE MAPPO network feeds correctly without dimension mismatch."""
+    N = 20
+    device = "cpu"
+    env = VectorMurmurationEnv(num_agents=N, device=device)
+    obs = env.reset()
+    global_obs = env.get_global_state()
+    
+    brain = StarlingBrain(obs_dim=env.obs_dim, global_obs_dim=env.global_obs_dim, action_dim=env.action_dim, hidden_size=64)
+    
+    # Forward pass checking action, logprob, entropy, and global value
+    actions, log_probs, entropies, values = brain.get_action_and_value(obs, global_obs)
+    
+    assert actions.shape == (N, 3), "Actor output mismatch"
+    assert log_probs.shape == (N,), "Logprob shape mismatch"
+    assert values.shape == (N, 1), "Centralized Critic output mismatch"
+    
+    # Value function should not fail when training step tries to flatten it
+    values.flatten()
+    
+    print("test_centralized_critic: PASSED ✓")
 
 # ------------------------------------------------------------------ #
 # Benchmark — old vs new
@@ -210,4 +253,6 @@ if __name__ == "__main__":
         test_rewards_match()
         test_multi_step()
         test_dones_persistence()
+        test_global_state()
+        test_centralized_critic()
         print("\nAll correctness tests done.")
