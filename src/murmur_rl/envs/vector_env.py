@@ -42,7 +42,7 @@ class VectorMurmurationEnv:
             perception_radius=perception_radius,
         )
 
-        self.obs_dim = 16
+        self.obs_dim = 18
         self.action_dim = 3
         self.num_moves = 0
         self.max_steps = 500
@@ -202,15 +202,13 @@ class VectorMurmurationEnv:
         in_front = torch.where(far, self._zero, in_front)
 
         # === Boundary ===
-        dist_lo = pos                                           # (N, 3)
-        dist_hi = self.space_size - pos                         # (N, 3)
-        closest_wall = torch.min(dist_lo, dist_hi).min(dim=1, keepdim=True).values
-        closest_wall_norm = (closest_wall / (self.space_size / 2.0)).clamp(max=1.0)
+        # 3D relative position from center [-1.0, 1.0]
+        pos_relative = (pos - self._half_space) / self._half_space
 
         # === Velocity normalised ===
         vel_norm = vel / self.physics.base_speed
 
-        # --- Concatenate (N, 16) ---
+        # --- Concatenate (N, 18) ---
         obs = torch.cat([
             vel_norm,           # 3
             nearest_dist,       # 1
@@ -221,7 +219,7 @@ class VectorMurmurationEnv:
             v_close_norm,       # 1
             loom_norm,          # 1
             in_front,           # 1
-            closest_wall_norm,  # 1
+            pos_relative,       # 3
         ], dim=1)
 
         return obs
@@ -252,20 +250,18 @@ class VectorMurmurationEnv:
         # Collisions: < 1.0
         collision_count = (dist_matrix < 1.0).sum(dim=1).float()
 
-        # Wall deaths
-        margin = 1.0
-        hit_wall = (pos < margin).any(dim=1) | (pos > (self.space_size - margin)).any(dim=1)
-
         # Predator deaths (physics already updated alive_mask)
         killed_by_predator = ~alive & ~self._dead_mask  # newly killed by predator
+        new_deaths = killed_by_predator
 
-        # Wall deaths that are new
-        killed_by_wall = hit_wall & ~self._dead_mask
-
-        new_deaths = killed_by_predator | killed_by_wall
-
-        # Kill wall-hit agents in physics too
-        self.physics.alive_mask &= ~killed_by_wall
+        # Continuous boundary penalty
+        margin = self.space_size * 0.1
+        dist_lo = pos
+        dist_hi = self.space_size - pos
+        closest_wall = torch.min(dist_lo, dist_hi).min(dim=1).values
+        penetration = torch.clamp(margin - closest_wall, min=0.0)
+        # Scaled penalty linearly increasing as boid approaches the wall within margin
+        boundary_penalty = -10.0 * (penetration / margin)
 
         # --- Compute rewards vectorised ---
         # Base survival reward
@@ -276,6 +272,9 @@ class VectorMurmurationEnv:
 
         # Collision penalty
         rewards -= 2.0 * collision_count
+
+        # Apply continuous boundary penalty
+        rewards += boundary_penalty
 
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)

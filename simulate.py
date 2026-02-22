@@ -25,8 +25,20 @@ class RLVision3D:
         self.env.physics.max_force = 2.0
         
         # Initialize RL Brain
-        self.brain = StarlingBrain(obs_dim=16, action_dim=3, hidden_size=64).to(self.device)
-        self.brain.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        self.brain = StarlingBrain(obs_dim=18, action_dim=3, hidden_size=64).to(self.device)
+        try:
+            self.brain.load_state_dict(torch.load(checkpoint_path, map_location=self.device, weights_only=True))
+        except RuntimeError as e:
+            if "size mismatch" in str(e):
+                print(f"\n[ERROR] Checkpoint Loading Failed: Size Mismatch")
+                print(f"The checkpoint '{checkpoint_path}' appears to be trained on an older version of the environment.")
+                print("The observation space has been upgraded from 16 to 18 dimensions (3D boundary relative positions).")
+                print("Please train a new agent to use with the current environment.")
+                import sys
+                sys.exit(1)
+            else:
+                raise e
+                
         self.brain.eval()
         
         self.obs = self.env.reset()

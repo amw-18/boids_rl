@@ -59,9 +59,7 @@ class MurmurationEnv(ParallelEnv):
         #   - v_close (1)
         #   - loom (1)
         #   - in_front (1)
-        # - Boundary distances (1) - distance to closest wall
-        
-        obs_dim = 3 + 1 + 1 + 3 + 3 + 1 + 1 + 1 + 1 + 1
+        obs_dim = 3 + 1 + 1 + 3 + 3 + 1 + 1 + 1 + 1 + 3
         
         # Spaces are defined in NumPy for PettingZoo standard compliance,
         # even though computation is in PyTorch.
@@ -212,12 +210,8 @@ class MurmurationEnv(ParallelEnv):
         in_front.masked_fill_(threat_mask, 0.0)
         
         # === Bounds ===
-        # Distance to closest wall (Normalized 0-1)
-        dist_to_bounds_x = torch.min(pos[:, 0], self.space_size - pos[:, 0]).unsqueeze(1)
-        dist_to_bounds_y = torch.min(pos[:, 1], self.space_size - pos[:, 1]).unsqueeze(1)
-        dist_to_bounds_z = torch.min(pos[:, 2], self.space_size - pos[:, 2]).unsqueeze(1)
-        closest_wall = torch.min(torch.cat([dist_to_bounds_x, dist_to_bounds_y, dist_to_bounds_z], dim=1), dim=1, keepdim=True)[0]
-        closest_wall_norm = torch.clamp(closest_wall / (self.space_size / 2.0), max=1.0)
+        # 3D relative position from center [-1.0, 1.0]
+        pos_relative = (pos - (self.space_size / 2.0)) / (self.space_size / 2.0)
         
         # Normalize self velocity [-1, 1]
         vel_norm = vel / self.physics.base_speed
@@ -235,7 +229,7 @@ class MurmurationEnv(ParallelEnv):
                 v_close_norm[i],           # 1
                 loom_norm[i],              # 1
                 in_front[i],               # 1
-                closest_wall_norm[i]       # 1
+                pos_relative[i]            # 3
             ]).cpu().numpy()
             
             obs_dict[agent] = obs
@@ -268,9 +262,15 @@ class MurmurationEnv(ParallelEnv):
         # Collision: distance < 1.0 is bad
         collision_count = (dist_matrix < 1.0).sum(dim=1).float()
         
-        # Bounds check for death
-        margin = 1.0
-        hit_wall = (pos < margin).any(dim=1) | (pos > (self.space_size - margin)).any(dim=1)
+        # Continuous boundary penalty
+        margin = self.space_size * 0.1
+        dist_to_bounds_x = torch.min(pos[:, 0], self.space_size - pos[:, 0]).unsqueeze(1)
+        dist_to_bounds_y = torch.min(pos[:, 1], self.space_size - pos[:, 1]).unsqueeze(1)
+        dist_to_bounds_z = torch.min(pos[:, 2], self.space_size - pos[:, 2]).unsqueeze(1)
+        closest_wall = torch.min(torch.cat([dist_to_bounds_x, dist_to_bounds_y, dist_to_bounds_z], dim=1), dim=1, keepdim=True)[0].squeeze(1)
+        
+        penetration = torch.clamp(margin - closest_wall, min=0.0)
+        boundary_penalty = -10.0 * (penetration / margin)
         
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
@@ -284,16 +284,11 @@ class MurmurationEnv(ParallelEnv):
                 self.dead_agents.add(agent)
                 continue
                 
-            if hit_wall[i]:
-                # Death by wall
-                rewards[agent] = -100.0
-                self.dead_agents.add(agent)
-                # Manually kill physical velocity so it stops forever
-                self.physics.alive_mask[i] = False
-                continue
-                
             # Stay alive base reward
             rew = 0.1 
+            
+            # Add boundary penalty
+            rew += boundary_penalty[i].item()
             
             # Social reward
             if social_count[i] > 0:

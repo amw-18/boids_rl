@@ -61,7 +61,7 @@ def main():
     env.physics.max_force = config["max_force"]
     
     # --- 3. Initialize Shared Brain ---
-    obs_dim = 16
+    obs_dim = 18
     brain = StarlingBrain(obs_dim=obs_dim, action_dim=3, hidden_size=64)
     
     # --- 3b. PyTorch-level optimizations ---

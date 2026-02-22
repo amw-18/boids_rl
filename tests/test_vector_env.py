@@ -102,12 +102,12 @@ def test_multi_step():
     N = 50
     env = VectorMurmurationEnv(num_agents=N, device="cpu")
     obs = env.reset()
-    assert obs.shape == (N, 16), f"Bad obs shape: {obs.shape}"
+    assert obs.shape == (N, 18), f"Bad obs shape: {obs.shape}"
 
     for _ in range(20):
         actions = torch.randn(N, 3).clamp(-1, 1)
         obs, rewards, dones = env.step(actions)
-        assert obs.shape == (N, 16)
+        assert obs.shape == (N, 18)
         assert rewards.shape == (N,)
         assert dones.shape == (N,)
 
@@ -125,8 +125,8 @@ def test_dones_persistence():
     vec_env.reset()
     pz_env.reset()
     
-    # Force agent 0 to die by giving it a position outside the bounds
-    vec_env.physics.positions[0] = torch.tensor([500.0, 500.0, 500.0])
+    # Force agent 0 to die by giving it a position exactly at the predator
+    vec_env.physics.positions[0] = vec_env.physics.predator_position[0].clone()
     _sync_envs(vec_env, pz_env)
     
     actions = torch.zeros(N, 3)
