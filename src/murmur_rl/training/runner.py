@@ -30,7 +30,8 @@ def main():
         "rollout_steps": 100,        # Timesteps collected before PPO update
         "num_epochs": 5000,          # Total iterations
         
-        "learning_rate": 3e-4,
+        "actor_lr": 3e-4,
+        "critic_lr": 1e-3,
         "gamma": 0.99,
         "gae_lambda": 0.95,
         "clip_coef": 0.2,
@@ -125,7 +126,8 @@ def main():
         env=env,
         brain=brain,
         device=device,
-        lr=config["learning_rate"],
+        actor_lr=config["actor_lr"],
+        critic_lr=config["critic_lr"],
         gamma=config["gamma"],
         gae_lambda=config["gae_lambda"],
         clip_coef=config["clip_coef"],
@@ -166,7 +168,7 @@ def main():
         trainer.ent_coef = current_ent_coef
         
         # Train PPO
-        pg_loss, v_loss, entropy, mean_return = trainer.train_step(rollouts)
+        pg_loss, v_loss, entropy, mean_return, explained_variance = trainer.train_step(rollouts)
         
         # Log to WandB
         if use_wandb:
@@ -176,6 +178,7 @@ def main():
                     "loss/policy_loss": pg_loss,
                     "loss/value_loss": v_loss,
                     "loss/entropy": entropy,
+                    "loss/explained_variance": explained_variance,
                     "reward/mean_gae_return": mean_return,
                     "biology/mean_predator_distance": actual_predator_dist,
                     "biology/mean_social_neighbors": actual_social_neighbors,
@@ -184,7 +187,7 @@ def main():
                 print(f"Warning: WandB log failed at epoch {epoch} ({e})")
         
         if epoch % 50 == 0 or epoch == start_epoch:
-            print(f"Epoch {epoch:04d} | Ret: {mean_return:>7.4f} | Ent: {entropy:>6.4f} | VLoss: {v_loss:>7.4f} | Ploss: {pg_loss:>7.4f} | EvasionDist: {actual_predator_dist:>5.1f}m | Cohort: {actual_social_neighbors:>4.1f}")
+            print(f"Epoch {epoch:04d} | Ret: {mean_return:>7.4f} | Ent: {entropy:>6.4f} | VLoss: {v_loss:>7.4f} | Ploss: {pg_loss:>7.4f} | EV: {explained_variance:>6.4f} | EvasionDist: {actual_predator_dist:>5.1f}m | Cohort: {actual_social_neighbors:>4.1f}")
         
         # Checkpointing
         if epoch % 500 == 0:
