@@ -35,8 +35,17 @@ class BoidsPhysics:
         self.predator_speed = base_speed * 1.5 
         self.predator_turn_angle = max_turn_angle * 1.5
         self.predator_catch_radius = 2.0
-        self.predator_confusion_dist = 3.0 # Min distance from CoM to be targeted
         
+        # Falcon State Machine Parameters
+        self.min_flock_size = 5
+        self.predator_vantage_z = space_size * 0.9
+        self.predator_reset_duration = 50 # Timesteps to stay in VANTAGE
+        
+        # 'VANTAGE', 'HUNTING', 'DIVING'
+        self.predator_state = 'VANTAGE'
+        self.predator_timer = 0
+        self.predator_target_pos = None
+
         self.reset()
         
     def reset(self):
@@ -58,6 +67,11 @@ class BoidsPhysics:
         pred_vel = (torch.rand((1, 3), device=self.device, dtype=torch.float32) * 2 - 1)
         self.predator_velocity = (pred_vel / torch.norm(pred_vel).clamp(min=1e-5)) * self.predator_speed
         
+        # Reset State Machine
+        self.predator_state = 'VANTAGE'
+        self.predator_timer = self.predator_reset_duration
+        self.predator_target_pos = None
+
         # Boids that have been eaten (boolean mask, True = alive, False = dead)
         self.alive_mask = torch.ones(self.num_boids, dtype=torch.bool, device=self.device)
         
@@ -140,31 +154,76 @@ class BoidsPhysics:
         self._check_captures()
         
     def _update_predator(self):
-        """Update predator velocity and position, targeting the most isolated boid."""
+        """Update predator velocity and position via the Falcon State Machine."""
         if not self.alive_mask.any():
             return # Everyone is dead
             
-        # 1. Target Selection (Most Isolated = furthest from Center of Mass)
-        # Calculate CoM of ALIVE boids
         alive_positions = self.positions[self.alive_mask]
-        com = alive_positions.mean(dim=0, keepdim=True)
         
-        # Distance of each alive boid to CoM
-        dist_to_com = torch.norm(alive_positions - com, dim=-1)
-        
-        # Find the index of the furthest alive boid
-        max_dist_idx = torch.argmax(dist_to_com)
-        max_dist = dist_to_com[max_dist_idx]
-        
-        # If the furthest boid is too close to the flock (confusion effect),
-        # the predator loses its lock and just flies towards the center of mass
-        if max_dist < self.predator_confusion_dist:
-            target_position = com
-        else:
-            # We need the actual position of the target
-            target_position = alive_positions[max_dist_idx].unsqueeze(0)
-        
+        # --- STATE: VANTAGE (Resetting) ---
+        if self.predator_state == 'VANTAGE':
+            self.predator_timer -= 1
+            if self.predator_timer > 0:
+                # Climb to vantage altitude
+                target_position = torch.tensor([[self.space_size/2, self.space_size/2, self.predator_vantage_z]], device=self.device)
+                self.predator_target_pos = target_position
+            else:
+                # Timer expired, transition to hunting/diving
+                self.predator_state = 'EVALUATE'
+                
+        # --- PREPARE: Density Scanning ---
+        # We need density info for both HUNTING and DIVING
+        if self.predator_state != 'VANTAGE':
+            # Compute pairwise distances between all alive boids
+            dist_matrix = torch.cdist(alive_positions, alive_positions)
+            
+            # Count neighbors within perception radius (subtract 1 so we don't count self)
+            neighbors = (dist_matrix < self.perception_radius).sum(dim=1) - 1
+            
+            # Find isolated boids
+            isolated_mask = neighbors < self.min_flock_size
+            
+            if isolated_mask.any():
+                self.predator_state = 'HUNTING'
+            else:
+                self.predator_state = 'DIVING'
+                
+        # --- STATE: HUNTING ---
+        if self.predator_state == 'HUNTING':
+            isolated_positions = alive_positions[isolated_mask]
+            
+            # Find the closest isolated boid
+            dist_to_predator = torch.norm(isolated_positions - self.predator_position, dim=-1)
+            closest_idx = torch.argmin(dist_to_predator)
+            
+            target_position = isolated_positions[closest_idx].unsqueeze(0)
+            self.predator_target_pos = target_position
+            
+        # --- STATE: DIVING ---
+        if self.predator_state == 'DIVING':
+            # No isolated boids. Dive through the center of the nearest flock.
+            # 1. Find nearest boid overall
+            dist_to_all = torch.norm(alive_positions - self.predator_position, dim=-1)
+            nearest_overall_idx = torch.argmin(dist_to_all)
+            
+            # 2. Find the local flock of that nearest boid
+            nearest_boid_pos = alive_positions[nearest_overall_idx:nearest_overall_idx+1]
+            flock_distances = torch.cdist(nearest_boid_pos, alive_positions).squeeze(0)
+            local_flock_mask = flock_distances < self.perception_radius
+            local_flock_positions = alive_positions[local_flock_mask]
+            
+            # 3. Target the local Center of Mass
+            target_position = local_flock_positions.mean(dim=0, keepdim=True)
+            self.predator_target_pos = target_position
+            
+            # Check if dive is complete (passed through the flock target Z)
+            if self.predator_position[0, 2] < target_position[0, 2] + 5.0 and self.predator_velocity[0, 2] < 0:
+                self.predator_state = 'VANTAGE'
+                self.predator_timer = self.predator_reset_duration
+                
         # 2. Seek Behavior (Steering within cone constraint)
+        # Use whatever target_position the state machine selected
+        target_position = self.predator_target_pos
         desired_velocity = target_position - self.predator_position
         dist_to_target = torch.norm(desired_velocity).clamp(min=1e-5)
         desired_heading = desired_velocity / dist_to_target

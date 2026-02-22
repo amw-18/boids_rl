@@ -275,9 +275,6 @@ class VectorMurmurationEnv:
         # Base survival reward
         rewards = torch.full((self.n_agents,), 0.1, device=self.device)
 
-        # Social bonus: 0.05 * min(social_count, 5)
-        rewards += 0.05 * social_count.clamp(max=5.0)
-
         # Collision penalty
         rewards -= 2.0 * collision_count
 

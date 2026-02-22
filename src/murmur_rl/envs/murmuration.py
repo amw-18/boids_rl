@@ -298,10 +298,6 @@ class MurmurationEnv(ParallelEnv):
             
             # Add predator proximity penalty
             rew += predator_proximity_penalty[i].item()
-            
-            # Social reward
-            if social_count[i] > 0:
-                 rew += 0.05 * min(social_count[i].item(), 5.0) # Cap at 5 neighbors worth
                  
             # Collision penalty
             if collision_count[i] > 0:
