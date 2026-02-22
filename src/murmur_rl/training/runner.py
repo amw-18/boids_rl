@@ -12,13 +12,15 @@ from murmur_rl.training.ppo import PPOTrainer
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=str, default="", help="Path to checkpoint to resume from")
+    parser.add_argument("--start-epoch", type=int, default=None, help="Epoch to start training from")
     parser.add_argument("--no-wandb", action="store_true", help="Disable W&B logging")
+    parser.add_argument("--checkpoints-dir", type=str, default="checkpoints", help="Directory to save checkpoints")
     args = parser.parse_args()
 
     # --- 1. Hyperparameter Configuration ---
     config = {
         "num_agents": 250,           # Slightly fewer to keep FPS high during heavy training
-        "space_size": 100.0,
+        "space_size": 1000.0,
         "perception_radius": 15.0,
         "base_speed": 5.0,
         "max_turn_angle": 0.5,
@@ -82,11 +84,15 @@ def main():
         print(f"Resuming from checkpoint: {args.resume}")
         try:
             brain.load_state_dict(torch.load(args.resume, map_location=device, weights_only=True))
-            import re
-            match = re.search(r'ep(\d+)', args.resume)
-            if match:
-                start_epoch = int(match.group(1)) + 1
-                print(f"Resuming at epoch {start_epoch}")
+            if args.start_epoch is None:
+                import re
+                match = re.search(r'ep(\d+)', args.resume)
+                if match:
+                    start_epoch = int(match.group(1)) + 1
+                    print(f"Resuming at epoch {start_epoch}")
+            else:
+                start_epoch = args.start_epoch
+                print(f"Starting from epoch {start_epoch}")
         except Exception as e:
             print(f"Failed to load checkpoint {args.resume}: {e}")
             import sys
@@ -127,7 +133,7 @@ def main():
         batch_size=config["batch_size"],
     )
     
-    os.makedirs("checkpoints", exist_ok=True)
+    os.makedirs(args.checkpoints_dir, exist_ok=True)
     
     # --- 5. Training Loop ---
     # Observation column indices (from VectorMurmurationEnv._get_observations concat order):
@@ -179,7 +185,7 @@ def main():
         
         # Checkpointing
         if epoch % 500 == 0:
-            chkpt_path = f"checkpoints/starling_brain_ep{epoch}.pth"
+            chkpt_path = f"{args.checkpoints_dir}/starling_brain_ep{epoch}.pth"
             torch.save(brain.state_dict(), chkpt_path)
             print(f"Saved Checkpoint: {chkpt_path}")
             
