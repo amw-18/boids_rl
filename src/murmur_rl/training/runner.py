@@ -20,7 +20,8 @@ def main():
     # --- 1. Hyperparameter Configuration ---
     config = {
         "num_agents": 250,           # Slightly fewer to keep FPS high during heavy training
-        "space_size": 1000.0,
+        "num_predators": 5,          # Scaled predator count for 500x500 space
+        "space_size": 500.0,
         "perception_radius": 15.0,
         "base_speed": 5.0,
         "max_turn_angle": 0.5,
@@ -65,6 +66,7 @@ def main():
     # --- 2. Initialize Vectorized Environment ---
     env = VectorMurmurationEnv(
         num_agents=config["num_agents"],
+        num_predators=config["num_predators"],
         space_size=config["space_size"],
         perception_radius=config["perception_radius"],
         device=device_name,

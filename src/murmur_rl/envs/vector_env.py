@@ -26,17 +26,20 @@ class VectorMurmurationEnv:
     def __init__(
         self,
         num_agents=50,
+        num_predators=5,
         space_size=100.0,
         perception_radius=10.0,
         device="cpu",
     ):
         self.n_agents = num_agents
+        self.num_predators = num_predators
         self.space_size = space_size
         self.perception_radius = perception_radius
         self.device = torch.device(device)
 
         self.physics = BoidsPhysics(
             num_boids=num_agents,
+            num_predators=num_predators,
             space_size=space_size,
             device=self.device,
             perception_radius=perception_radius,
@@ -45,8 +48,8 @@ class VectorMurmurationEnv:
         self.obs_dim = 18
         
         # Centralized Critic Global State Dimension:
-        # ALL positions (N * 3) + ALL velocities (N * 3) + Predator Pos (3) + Predator Vel (3) + Alive Mask (N)
-        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + 3 + 3 + num_agents
+        # ALL positions (N * 3) + ALL velocities (N * 3) + Predator Pos (P * 3) + Predator Vel (P * 3) + Alive Mask (N)
+        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + (num_predators * 3) + (num_predators * 3) + num_agents
         
         self.action_dim = 3
         self.num_moves = 0
@@ -177,11 +180,18 @@ class VectorMurmurationEnv:
         com_direction = com_direction * has_neighbors.float()
 
         # === Perceptual Threat (Predator) ===
-        pred_pos = self.physics.predator_position               # (1, 3)
-        pred_vel = self.physics.predator_velocity               # (1, 3)
+        pred_pos = self.physics.predator_position               # (num_predators, 3)
+        pred_vel = self.physics.predator_velocity               # (num_predators, 3)
 
-        dx = pred_pos - pos                                     # (N, 3)
-        dv = pred_vel - vel                                     # (N, 3)
+        # Find closest predator for each boid
+        dist_to_preds = torch.cdist(pos, pred_pos)              # (N, num_predators)
+        closest_pred_idx = torch.argmin(dist_to_preds, dim=1)   # (N,)
+        
+        closest_pred_pos = pred_pos[closest_pred_idx]           # (N, 3)
+        closest_pred_vel = pred_vel[closest_pred_idx]           # (N, 3)
+
+        dx = closest_pred_pos - pos                             # (N, 3)
+        dv = closest_pred_vel - vel                             # (N, 3)
 
         d = dx.norm(dim=-1, keepdim=True)                       # (N, 1)
         d_norm = (d / (self.space_size / 2.0)).clamp(max=1.0)
