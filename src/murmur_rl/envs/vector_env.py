@@ -26,23 +26,31 @@ class VectorMurmurationEnv:
     def __init__(
         self,
         num_agents=50,
+        num_predators=5,
         space_size=100.0,
         perception_radius=10.0,
         device="cpu",
     ):
         self.n_agents = num_agents
+        self.num_predators = num_predators
         self.space_size = space_size
         self.perception_radius = perception_radius
         self.device = torch.device(device)
 
         self.physics = BoidsPhysics(
             num_boids=num_agents,
+            num_predators=num_predators,
             space_size=space_size,
             device=self.device,
             perception_radius=perception_radius,
         )
 
-        self.obs_dim = 16
+        self.obs_dim = 18
+        
+        # Centralized Critic Global State Dimension:
+        # ALL positions (N * 3) + ALL velocities (N * 3) + Predator Pos (P * 3) + Predator Vel (P * 3) + Alive Mask (N)
+        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + (num_predators * 3) + (num_predators * 3) + num_agents
+        
         self.action_dim = 3
         self.num_moves = 0
         self.max_steps = 500
@@ -62,6 +70,7 @@ class VectorMurmurationEnv:
         self._dead_mask = torch.zeros(
             num_agents, dtype=torch.bool, device=self.device
         )
+        self.predator_danger_radius = 15.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -171,11 +180,18 @@ class VectorMurmurationEnv:
         com_direction = com_direction * has_neighbors.float()
 
         # === Perceptual Threat (Predator) ===
-        pred_pos = self.physics.predator_position               # (1, 3)
-        pred_vel = self.physics.predator_velocity               # (1, 3)
+        pred_pos = self.physics.predator_position               # (num_predators, 3)
+        pred_vel = self.physics.predator_velocity               # (num_predators, 3)
 
-        dx = pred_pos - pos                                     # (N, 3)
-        dv = pred_vel - vel                                     # (N, 3)
+        # Find closest predator for each boid
+        dist_to_preds = torch.cdist(pos, pred_pos)              # (N, num_predators)
+        closest_pred_idx = torch.argmin(dist_to_preds, dim=1)   # (N,)
+        
+        closest_pred_pos = pred_pos[closest_pred_idx]           # (N, 3)
+        closest_pred_vel = pred_vel[closest_pred_idx]           # (N, 3)
+
+        dx = closest_pred_pos - pos                             # (N, 3)
+        dv = closest_pred_vel - vel                             # (N, 3)
 
         d = dx.norm(dim=-1, keepdim=True)                       # (N, 1)
         d_norm = (d / (self.space_size / 2.0)).clamp(max=1.0)
@@ -202,15 +218,13 @@ class VectorMurmurationEnv:
         in_front = torch.where(far, self._zero, in_front)
 
         # === Boundary ===
-        dist_lo = pos                                           # (N, 3)
-        dist_hi = self.space_size - pos                         # (N, 3)
-        closest_wall = torch.min(dist_lo, dist_hi).min(dim=1, keepdim=True).values
-        closest_wall_norm = (closest_wall / (self.space_size / 2.0)).clamp(max=1.0)
+        # 3D relative position from center [-1.0, 1.0]
+        pos_relative = (pos - self._half_space) / self._half_space
 
         # === Velocity normalised ===
         vel_norm = vel / self.physics.base_speed
 
-        # --- Concatenate (N, 16) ---
+        # --- Concatenate (N, 18) ---
         obs = torch.cat([
             vel_norm,           # 3
             nearest_dist,       # 1
@@ -221,10 +235,33 @@ class VectorMurmurationEnv:
             v_close_norm,       # 1
             loom_norm,          # 1
             in_front,           # 1
-            closest_wall_norm,  # 1
+            pos_relative,       # 3
         ], dim=1)
 
         return obs
+        
+    def get_global_state(self):
+        """
+        Returns the global state tensor for the Centralized Critic.
+        Shape: (N, global_obs_dim) -> Each agent gets a copy of the exact same global state.
+        Contains flattened arrays of all boid positions, velocities, alive masks, and predator state.
+        This provides perfect global omniscience to solve the Credit Assignment Problem.
+        """
+        pos = self.physics.positions.flatten() / self.space_size  # Normalized [0, 1]
+        vel = self.physics.velocities.flatten() / self.physics.base_speed
+        
+        pred_pos = self.physics.predator_position.flatten() / self.space_size
+        pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_speed
+        
+        alive = self.physics.alive_mask.float()
+        
+        # Concatenate everything into 1D global state vector
+        global_state_1d = torch.cat([pos, vel, pred_pos, pred_vel, alive], dim=0)
+        
+        # Expand across all agents so each gets exactly the same global observation
+        global_state = global_state_1d.unsqueeze(0).expand(self.n_agents, -1)
+        
+        return global_state
 
     # ------------------------------------------------------------------
     # Vectorized rewards — zero Python loops
@@ -252,30 +289,28 @@ class VectorMurmurationEnv:
         # Collisions: < 1.0
         collision_count = (dist_matrix < 1.0).sum(dim=1).float()
 
-        # Wall deaths
-        margin = 1.0
-        hit_wall = (pos < margin).any(dim=1) | (pos > (self.space_size - margin)).any(dim=1)
-
         # Predator deaths (physics already updated alive_mask)
         killed_by_predator = ~alive & ~self._dead_mask  # newly killed by predator
+        new_deaths = killed_by_predator
 
-        # Wall deaths that are new
-        killed_by_wall = hit_wall & ~self._dead_mask
-
-        new_deaths = killed_by_predator | killed_by_wall
-
-        # Kill wall-hit agents in physics too
-        self.physics.alive_mask &= ~killed_by_wall
+        # Continuous boundary penalty
+        margin = self.space_size * 0.1
+        dist_lo = pos
+        dist_hi = self.space_size - pos
+        closest_wall = torch.min(dist_lo, dist_hi).min(dim=1).values
+        penetration = torch.clamp(margin - closest_wall, min=0.0)
+        # Scaled penalty linearly increasing as boid approaches the wall within margin
+        boundary_penalty = -10.0 * (penetration / margin)
 
         # --- Compute rewards vectorised ---
         # Base survival reward
         rewards = torch.full((self.n_agents,), 0.1, device=self.device)
 
-        # Social bonus: 0.05 * min(social_count, 5)
-        rewards += 0.05 * social_count.clamp(max=5.0)
-
         # Collision penalty
         rewards -= 2.0 * collision_count
+
+        # Apply continuous boundary penalty
+        rewards += boundary_penalty
 
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)

@@ -10,7 +10,7 @@ def test_env_initialization():
     
     # Check observation space (Biological Features)
     obs_space = env.observation_space('starling_0')
-    assert obs_space.shape[0] == 16  # vel(3) + context(8) + threat(4) + bounds(1)
+    assert obs_space.shape[0] == 18  # vel(3) + context(8) + threat(4) + bounds(3)
     
     # Check action space
     act_space = env.action_space('starling_0')
