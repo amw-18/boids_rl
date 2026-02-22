@@ -142,9 +142,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default="checkpoints1/starling_brain_ep5000.pth")
     parser.add_argument("--save", type=str, default="murmuration_rl.gif")
     parser.add_argument("--frames", type=int, default=1800)
-    parser.add_argument("--num-boids", type=int, default=400)
-    parser.add_argument("--num-predators", type=int, default=5)
-    parser.add_argument("--space-size", type=float, default=500.0)
+    parser.add_argument("--num-boids", type=int, default=250)
+    parser.add_argument("--num-predators", type=int, default=4)
+    parser.add_argument("--space-size", type=float, default=100.0)
     args = parser.parse_args()
     
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
