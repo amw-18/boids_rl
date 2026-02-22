@@ -20,7 +20,8 @@ def main():
     # --- 1. Hyperparameter Configuration ---
     config = {
         "num_agents": 250,           # Slightly fewer to keep FPS high during heavy training
-        "space_size": 1000.0,
+        "num_predators": 4,          # Scaled predator count for 500x500 space
+        "space_size": 100.0,
         "perception_radius": 15.0,
         "base_speed": 5.0,
         "max_turn_angle": 0.5,
@@ -65,6 +66,7 @@ def main():
     # --- 2. Initialize Vectorized Environment ---
     env = VectorMurmurationEnv(
         num_agents=config["num_agents"],
+        num_predators=config["num_predators"],
         space_size=config["space_size"],
         perception_radius=config["perception_radius"],
         device=device_name,
@@ -77,7 +79,8 @@ def main():
     
     # --- 3. Initialize Shared Brain ---
     obs_dim = 18
-    brain = StarlingBrain(obs_dim=obs_dim, action_dim=3, hidden_size=64)
+    global_obs_dim = env.global_obs_dim
+    brain = StarlingBrain(obs_dim=obs_dim, global_obs_dim=global_obs_dim, action_dim=3, hidden_size=64)
     
     start_epoch = 1
     if args.resume:

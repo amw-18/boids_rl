@@ -51,6 +51,7 @@ class PPOTrainer:
         # Pre-allocate buffers
         N = self.env.n_agents
         b_obs      = torch.empty((num_steps, N, self.env.obs_dim), device=self.device)
+        b_global_obs = torch.empty((num_steps, N, self.env.global_obs_dim), device=self.device)
         b_actions  = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
         b_logprobs = torch.empty((num_steps, N), device=self.device)
         b_rewards  = torch.empty((num_steps, N), device=self.device)
@@ -58,10 +59,13 @@ class PPOTrainer:
         b_values   = torch.empty((num_steps, N), device=self.device)
 
         for step in range(num_steps):
+            global_obs = self.env.get_global_state()
+            
             b_obs[step] = obs
+            b_global_obs[step] = global_obs
 
             with torch.no_grad():
-                action, logprob, _, value = self.brain.get_action_and_value(obs)
+                action, logprob, _, value = self.brain.get_action_and_value(obs, global_obs)
 
             next_obs, rewards, dones = self.env.step(action)
 
@@ -75,12 +79,14 @@ class PPOTrainer:
 
         return {
             "obs":      b_obs,
+            "global_obs": b_global_obs,
             "actions":  b_actions,
             "logprobs": b_logprobs,
             "rewards":  b_rewards,
             "dones":    b_dones,
             "values":   b_values,
             "final_obs": obs,               # (N, 16) tensor
+            "final_global_obs": self.env.get_global_state(),
         }
 
     def compute_advantages(self, rollouts):
@@ -91,8 +97,9 @@ class PPOTrainer:
 
         # Bootstrap value for next step
         final_obs = rollouts["final_obs"]   # (N, 16) tensor — always present
+        final_global_obs = rollouts["final_global_obs"]
         with torch.no_grad():
-            _, _, _, next_value = self.brain.get_action_and_value(final_obs)
+            _, _, _, next_value = self.brain.get_action_and_value(final_obs, final_global_obs)
             next_value = next_value.flatten()
 
         advantages = torch.zeros_like(rewards)
@@ -115,6 +122,7 @@ class PPOTrainer:
 
     def train_step(self, rollouts):
         b_obs = rollouts["obs"]
+        b_global_obs = rollouts["global_obs"]
         b_actions = rollouts["actions"]
         b_logprobs = rollouts["logprobs"]
         
@@ -130,6 +138,7 @@ class PPOTrainer:
         
         # Flatten all batches using the validity mask to discard padding
         mb_obs = b_obs[valid_mask]
+        mb_global_obs = b_global_obs[valid_mask]
         mb_actions = b_actions[valid_mask]
         mb_logprobs = b_logprobs[valid_mask]
         
@@ -160,12 +169,13 @@ class PPOTrainer:
                 
                 # Fetch mini-batch data
                 mini_obs = mb_obs[mb_inds]
+                mini_global_obs = mb_global_obs[mb_inds]
                 mini_actions = mb_actions[mb_inds]
                 mini_advantages = mb_advantages[mb_inds]
                 mini_returns = mb_returns[mb_inds]
                 mini_logprobs = mb_logprobs[mb_inds]
                 
-                _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mini_obs, mini_actions)
+                _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mini_obs, mini_global_obs, mini_actions)
                 logratio = newlogprob - mini_logprobs
                 ratio = logratio.exp()
                 

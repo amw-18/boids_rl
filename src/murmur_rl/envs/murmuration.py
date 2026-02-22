@@ -17,30 +17,25 @@ class MurmurationEnv(ParallelEnv):
         "name": "murmuration_v0"
     }
 
-    def __init__(
-        self,
-        num_agents=50,
-        space_size=100.0,
-        perception_radius=10.0,
-        render_mode=None,
-        device="cpu"
-    ):
+    def __init__(self, num_agents=50, num_predators=5, space_size=100.0, perception_radius=10.0, device='cpu'):
+        super().__init__()
         self.n_agents = num_agents
+        self.num_predators = num_predators
         self.space_size = space_size
         self.perception_radius = perception_radius
         self.device = torch.device(device)
-        self.render_mode = render_mode
         
-        self.possible_agents = [f"starling_{i}" for i in range(num_agents)]
+        self.possible_agents = [f"boid_{i}" for i in range(num_agents)]
         self.agents = self.possible_agents[:]
         
-        # Initialize the underlying PyTorch physics engine
+        # Instantiate Vectorized Physics Engine
         # We disable normal rules in physics engine if we want RL to learn them entirely,
         # but for murmuration we might want to start with normal boids and RL learns to tweak them, 
         # or RL learns everything from scratch.
         # Let's say RL learns to supply the raw steering force (X, Y, Z).
         self.physics = BoidsPhysics(
             num_boids=num_agents,
+            num_predators=num_predators,
             space_size=space_size,
             device=self.device,
             perception_radius=perception_radius
@@ -174,11 +169,18 @@ class MurmurationEnv(ParallelEnv):
                 com_direction[i] = norm_dir
                 
         # === Perceptual Threat (Predator) ===
-        predator_pos = self.physics.predator_position # (1, 3)
-        predator_vel = self.physics.predator_velocity # (1, 3)
+        predator_pos = self.physics.predator_position # (num_predators, 3)
+        predator_vel = self.physics.predator_velocity # (num_predators, 3)
         
-        dx = predator_pos - pos # (N, 3)
-        dv = predator_vel - vel # (N, 3)
+        # Find closest predator for each boid
+        dist_to_preds = torch.cdist(pos, predator_pos) # (N, num_predators)
+        closest_pred_idx = torch.argmin(dist_to_preds, dim=1) # (N,)
+        
+        closest_pred_pos = predator_pos[closest_pred_idx] # (N, 3)
+        closest_pred_vel = predator_vel[closest_pred_idx] # (N, 3)
+        
+        dx = closest_pred_pos - pos # (N, 3)
+        dv = closest_pred_vel - vel # (N, 3)
         
         # 1. Distance d (Normalized 0-1 based on half space size)
         d = torch.norm(dx, dim=-1, keepdim=True) # (N, 1)
@@ -272,12 +274,6 @@ class MurmurationEnv(ParallelEnv):
         penetration = torch.clamp(margin - closest_wall, min=0.0)
         boundary_penalty = -10.0 * (penetration / margin)
         
-        # Predator Proximity Penalty
-        predator_danger_radius = 15.0
-        dist_to_predator = torch.norm(pos - self.physics.predator_position, dim=-1)
-        pred_penetration = torch.clamp(predator_danger_radius - dist_to_predator, min=0.0)
-        predator_proximity_penalty = -5.0 * (pred_penetration / predator_danger_radius)
-        
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
                  # Already processed the death in a previous frame
@@ -295,9 +291,6 @@ class MurmurationEnv(ParallelEnv):
             
             # Add boundary penalty
             rew += boundary_penalty[i].item()
-            
-            # Add predator proximity penalty
-            rew += predator_proximity_penalty[i].item()
                  
             # Collision penalty
             if collision_count[i] > 0:
