@@ -295,12 +295,30 @@ class VectorMurmurationEnv:
 
         # Continuous boundary penalty
         margin = self.space_size * 0.1
-        dist_lo = pos
-        dist_hi = self.space_size - pos
-        closest_wall = torch.min(dist_lo, dist_hi).min(dim=1).values
-        penetration = torch.clamp(margin - closest_wall, min=0.0)
-        # Scaled penalty linearly increasing as boid approaches the wall within margin
-        boundary_penalty = -10.0 * (penetration / margin)
+        
+        # Original XY boundaries
+        dist_lo_xy = pos[:, :2]
+        dist_hi_xy = self.space_size - pos[:, :2]
+        closest_wall_xy = torch.min(dist_lo_xy, dist_hi_xy).min(dim=1).values
+        penetration_xy = torch.clamp(margin - closest_wall_xy, min=0.0)
+        boundary_penalty_xy = -10.0 * (penetration_xy / margin)
+        
+        # New Z-bound penalty (Floor=0, Ceiling=0.85)
+        z_pos = pos[:, 2]
+        ceiling = self.space_size * 0.85
+        dist_lo_z = z_pos
+        dist_hi_z = ceiling - z_pos
+        
+        # Penalize approaching the floor or the lowered ceiling
+        closest_wall_z = torch.min(dist_lo_z, dist_hi_z)
+        penetration_z = torch.clamp(margin - closest_wall_z, min=0.0)
+        
+        # Make the ceiling penalty much steeper to discourage hiding near predators
+        is_ceiling = dist_hi_z < dist_lo_z
+        penalty_z_mult = torch.where(is_ceiling, 20.0, 10.0)
+        boundary_penalty_z = -penalty_z_mult * (penetration_z / margin)
+        
+        boundary_penalty = boundary_penalty_xy + boundary_penalty_z
 
         # --- Compute rewards vectorised ---
         # Base survival reward
