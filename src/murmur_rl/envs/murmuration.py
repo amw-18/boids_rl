@@ -272,12 +272,6 @@ class MurmurationEnv(ParallelEnv):
         penetration = torch.clamp(margin - closest_wall, min=0.0)
         boundary_penalty = -10.0 * (penetration / margin)
         
-        # Predator Proximity Penalty
-        predator_danger_radius = 15.0
-        dist_to_predator = torch.norm(pos - self.physics.predator_position, dim=-1)
-        pred_penetration = torch.clamp(predator_danger_radius - dist_to_predator, min=0.0)
-        predator_proximity_penalty = -5.0 * (pred_penetration / predator_danger_radius)
-        
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
                  # Already processed the death in a previous frame
@@ -295,9 +289,6 @@ class MurmurationEnv(ParallelEnv):
             
             # Add boundary penalty
             rew += boundary_penalty[i].item()
-            
-            # Add predator proximity penalty
-            rew += predator_proximity_penalty[i].item()
                  
             # Collision penalty
             if collision_count[i] > 0:
