@@ -103,10 +103,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, default="checkpoints1/starling_brain_ep5000.pth")
     parser.add_argument("--save", type=str, default="murmuration_rl.gif")
-    parser.add_argument("--frames", type=int, default=3600)
+    parser.add_argument("--frames", type=int, default=1800)
     args = parser.parse_args()
     
-    device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    # device_name = "cuda" if torch.cuda.is_available() else "cpu"
+    device_name = "cpu"
     print(f"Generating Simulation using {device_name}...")
     vis = RLVision3D(checkpoint_path=args.checkpoint, num_boids=400, space_size=100.0, device=device_name)
     vis.animate(frames=args.frames, save_path=args.save)

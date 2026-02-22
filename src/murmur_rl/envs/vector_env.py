@@ -62,6 +62,7 @@ class VectorMurmurationEnv:
         self._dead_mask = torch.zeros(
             num_agents, dtype=torch.bool, device=self.device
         )
+        self.predator_danger_radius = 15.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -262,6 +263,13 @@ class VectorMurmurationEnv:
         penetration = torch.clamp(margin - closest_wall, min=0.0)
         # Scaled penalty linearly increasing as boid approaches the wall within margin
         boundary_penalty = -10.0 * (penetration / margin)
+        
+        # Predator Proximity Penalty
+        # Penalty increases as distance to predator decreases within predator_danger_radius
+        dist_to_predator = torch.norm(pos - self.physics.predator_position, dim=-1)
+        pred_penetration = torch.clamp(self.predator_danger_radius - dist_to_predator, min=0.0)
+        # Max continuous penalty of -5.0 when right next to predator
+        predator_proximity_penalty = -5.0 * (pred_penetration / self.predator_danger_radius)
 
         # --- Compute rewards vectorised ---
         # Base survival reward
@@ -275,6 +283,9 @@ class VectorMurmurationEnv:
 
         # Apply continuous boundary penalty
         rewards += boundary_penalty
+        
+        # Apply continuous predator proximity penalty
+        rewards += predator_proximity_penalty
 
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)

@@ -35,6 +35,7 @@ class BoidsPhysics:
         self.predator_speed = base_speed * 1.5 
         self.predator_turn_angle = max_turn_angle * 1.5
         self.predator_catch_radius = 2.0
+        self.predator_confusion_dist = 3.0 # Min distance from CoM to be targeted
         
         self.reset()
         
@@ -152,9 +153,16 @@ class BoidsPhysics:
         dist_to_com = torch.norm(alive_positions - com, dim=-1)
         
         # Find the index of the furthest alive boid
-        target_idx_in_alive = torch.argmax(dist_to_com)
-        # We need the actual position of the target
-        target_position = alive_positions[target_idx_in_alive].unsqueeze(0)
+        max_dist_idx = torch.argmax(dist_to_com)
+        max_dist = dist_to_com[max_dist_idx]
+        
+        # If the furthest boid is too close to the flock (confusion effect),
+        # the predator loses its lock and just flies towards the center of mass
+        if max_dist < self.predator_confusion_dist:
+            target_position = com
+        else:
+            # We need the actual position of the target
+            target_position = alive_positions[max_dist_idx].unsqueeze(0)
         
         # 2. Seek Behavior (Steering within cone constraint)
         desired_velocity = target_position - self.predator_position
