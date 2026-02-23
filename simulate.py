@@ -1,6 +1,9 @@
 import os
 import torch
 import numpy as np
+
+import matplotlib
+matplotlib.use('Agg') # Force headless mode for background video rendering
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from mpl_toolkits.mplot3d import Axes3D
