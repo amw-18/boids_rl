@@ -20,7 +20,7 @@ def main():
     # --- 1. Hyperparameter Configuration ---
     config = {
         "num_agents": 250,           # Slightly fewer to keep FPS high during heavy training
-        "num_predators": 4,          # Scaled predator count for 500x500 space
+        "num_predators": 4,
         "space_size": 100.0,
         "perception_radius": 15.0,
         "base_speed": 5.0,
