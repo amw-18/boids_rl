@@ -37,23 +37,23 @@ At each timestep $\Delta t = 0.1$, the environment processes updates in the foll
 
 3.  **Steering Cone Constraint (SLERP):** Real birds are limited by turning radii. We determine the angle $\theta$ between the current heading $\hat{v}_t$ and the desired heading $\hat{v}_{desired}$. 
     $$ \theta = \arccos(\hat{v}_t \cdot \hat{v}_{desired}) $$
-    The actual turn angle is clamped to a maximum physiological limit, $\theta_{turn} = \min(\theta, \text{max\_turn\_angle})$. We then use Spherical Linear Interpolation to generate the final heading, ensuring smooth, arcing flight paths.
+    The actual turn angle is clamped to a maximum physiological limit, $\theta_{turn} = \min(\theta, \theta_{max})$. We then use Spherical Linear Interpolation to generate the final heading, ensuring smooth, arcing flight paths.
 
 4.  **Constant Velocity:** To maintain aerodynamic realism, the magnitude of the velocity is ignored. The final heading vector is multiplied by a rigid constant $v_{base} = 5.0$, meaning boids fly continuously forward at a fixed speed. Positions are updated via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$.
 
 ### The Predator Mechanics: The Falcon State Machine
-To introduce realistic, dynamic survival pressure, we designed "Falcon" predator agents governed by a robust, non-differentiable state machine. Predators fly faster ($1.5 \times v_{base}$) and turn tighter ($1.5 \times \text{max\_turn\_angle}$) than boids. Their behavior loops through four strict states:
+To introduce realistic, dynamic survival pressure, we designed "Falcon" predator agents governed by a robust, non-differentiable state machine. Predators fly faster ($1.5 \times v_{base}$) and turn tighter ($1.5 \times \theta_{max}$) than boids. Their behavior loops through four strict states:
 
 1.  **VANTAGE (0):** The predator spawns and flies upwards to a height of $z \ge 0.9L$ (where $L$ is the boundary length). Upon reaching the vantage altitude, it holds its altitude and waits for a fixed `reset_duration` (50 timesteps) to survey the flock before transitioning.
 2.  **LOITER (3):** The predator wanders randomly above the flock at 30% of its top speed for a highly variant duration ($100 + \mathcal{U}(0, 300)$ timesteps). During this phase, it constantly evaluates the positional structure of the flock below.
 3.  **Target Selection & Evaluation:** At every single timestep during the HUNTING and DIVING states, the predator evaluates the flock to dynamically update its target $\vec{x}_{target}$.
-    *   **Isolation Metric:** For every alive boid $i$, the environment calculates a neighborhood density: $N_i = \sum_{j \neq i} \mathbb{I}(\|\vec{x}_i - \vec{x}_j\| < r_{percept})$. A boid is considered mathematically "isolated" if $N_i < \text{min\_flock\_size}$ (where $\text{min\_flock\_size} = 5$).
+    *   **Isolation Metric:** For every alive boid $i$, the environment calculates a neighborhood density: $N_i = \sum_{j \neq i} \mathbb{I}(\|\vec{x}_i - \vec{x}_j\| < r_{percept})$. A boid is considered mathematically "isolated" if $N_i < N_{min}$ (where $N_{min} = 5$).
     *   **State Choice:** When LOITER expires, if $\exists i$ such that $N_i < 5$, the predator enters **HUNTING**. Otherwise, it enters **DIVING**.
 4.  **HUNTING vs DIVING Execution:** 
     *   *Hunting (Targeting Isolation):* The predator calculates the distance to all currently isolated boids: $d_{pred,j} = \|\vec{x}_{pred} - \vec{x}_{j}\|$. At *every timestep*, it dynamically asserts its $\vec{x}_{target}$ to the coordinate of the isolated boid where $d_{pred,j}$ is minimized. If the boid rejoins the flock, the predator will instantly snap to the next closest isolated boid.
     *   *Diving (Targeting Density):* If no boids are isolated, the predator executes a high-speed plunge to scatter the flock. It finds the absolute closest boid $k$, calculates the subset of boids $V_k$ within $k$'s perception radius, and sets its $\vec{x}_{target}$ to the mathematical Center of Mass of that local sub-flock: $\vec{x}_{target} = \frac{1}{|V_k|} \sum_{v \in V_k} \vec{x}_v$.
     *   *Dive Completion:* A dive is considered structurally complete when the predator's altitude drops past the target ($\vec{x}_{pred, z} < \vec{x}_{target, z} + 5.0$) while maintaining a negative z-velocity ($\vec{v}_{pred, z} < 0$).
-5.  **Capture Mechanics:** At every timestep, the environment computes the 2D pairwise distance matrix between all predators and all boids. If any distance $\|\vec{x}_{pred} - \vec{x}_i\| < \text{catch\_radius}$ ($2.0$), boid $i$ is killed. The successful predator instantaneously resets to **VANTAGE**, computing a new random $x,y$ coordinate near the center $L/2$ to climb back toward.
+5.  **Capture Mechanics:** At every timestep, the environment computes the 2D pairwise distance matrix between all predators and all boids. If any distance $\|\vec{x}_{pred} - \vec{x}_i\| < r_{catch}$ (where $r_{catch} = 2.0$), boid $i$ is killed. The successful predator instantaneously resets to **VANTAGE**, computing a new random $x,y$ coordinate near the center $L/2$ to climb back toward.
 
 **Crucially, the predator does *not* explicitly evaluate the probabilistic "likelihood of capture"** or perform complex path planning (like pure pursuit interception or calculating optimal intercept angles). It utilizes a greedy, instantaneous sensory baseline: steering blindly toward the current coordinate of the closest isolated boid, or the current center-of-mass of the closest dense sub-flock.
 
