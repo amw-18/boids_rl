@@ -26,17 +26,23 @@ Unlike traditional grid-world or unconstrained continuous environments, our phys
 At each timestep $\Delta t = 0.1$, the environment processes updates in the following highly specific manner:
 
 1.  **Force Application:** The neural network outputs an action vector $\mathbf{a}_i \in [-1, 1]^4$. This action is explicitly decoupled into a 3D directional vector and a 1D magnitude scaler.
-    *   **Direction:** The first three dimensions form $\vec{d}_i$, which is L2-normalized to a strict unit vector $\hat{d}_i = \vec{d}_i / \|\vec{d}_i\|$.
+    *   **Direction:** The first three dimensions form $\vec{d}_i$, which is L2-normalized to a strict unit vector $\hat{d}_i = \vec{d}_i / |\vec{d}_i|$.
     *   **Magnitude:** The fourth dimension $m_i \in [-1, 1]$ is linearly mapped to a strict multiplier $M_i \in [0, 1]$ via $M_i = (m_i + 1.0) / 2.0$.
     The environment then calculates the total steering force by scaling the direction by the targeted magnitude and the maximum physical force limit $F_{max} = 2.0$:
-    $$F_{total} = \hat{d}_i \cdot M_i \cdot F_{max}$$
+    $$
+    F_{total} = \hat{d}_i \cdot M_i \cdot F_{max}
+    $$
     This permits the neural network to output anywhere from $0$ force to $F_{max}$ force in any arbitrary spherical direction.
 
 2.  **Kinematic Update:** We compute a theoretical "desired" velocity based on Newtonian momentum:
-    $$ \vec{v}_{des} = \vec{v}_t + F_{total} \Delta t $$
+    $$
+    \vec{v}_{des} = \vec{v}_t + F_{total} \Delta t
+    $$
 
 3.  **Steering Cone Constraint (SLERP):** Real birds are limited by turning radii. We determine the angle $\theta$ between the current heading $\hat{v}_t$ and the desired heading $\hat{v}_{des}$. 
-    $$ \theta = \arccos(\hat{v}_t \cdot \hat{v}_{des}) $$
+    $$
+    \theta = \arccos(\hat{v}_t \cdot \hat{v}_{des})
+    $$
     The actual turn angle is clamped to a maximum physiological limit, $\theta_{turn} = \min(\theta, \theta_{max})$. We then use Spherical Linear Interpolation to generate the final heading, ensuring smooth, arcing flight paths.
 
 4.  **Constant Velocity:** To maintain aerodynamic realism, the magnitude of the velocity is ignored. The final heading vector is multiplied by a rigid constant $v_{base} = 5.0$, meaning boids fly continuously forward at a fixed speed. Positions are updated via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$.
@@ -47,13 +53,13 @@ To introduce realistic, dynamic survival pressure, we designed "Falcon" predator
 1.  **VANTAGE (0):** The predator spawns and flies upwards to a height of $z \ge 0.9L$ (where $L$ is the boundary length). Upon reaching the vantage altitude, it holds its altitude and waits for a fixed `reset_duration` (50 timesteps) to survey the flock before transitioning.
 2.  **LOITER (3):** The predator wanders randomly above the flock at 30% of its top speed for a highly variant duration ($100 + \mathcal{U}(0, 300)$ timesteps). During this phase, it constantly evaluates the positional structure of the flock below.
 3.  **Target Selection & Evaluation:** At every single timestep during the HUNTING and DIVING states, the predator evaluates the flock to dynamically update its target $\vec{x}_{tgt}$.
-    *   **Isolation Metric:** For every alive boid $i$, the environment calculates a neighborhood density: $N_i = \sum_{j \neq i} \mathbb{I}(\|\vec{x}_i - \vec{x}_j\| < r_{percept})$. A boid is considered mathematically "isolated" if $N_i < N_{min}$ (where $N_{min} = 5$).
+    *   **Isolation Metric:** For every alive boid $i$, the environment calculates a neighborhood density: $N_i = \sum_{j \neq i} \mathbb{I}(|\vec{x}_i - \vec{x}_j| < r_{percept})$. A boid is considered mathematically "isolated" if $N_i < N_{min}$ (where $N_{min} = 5$).
     *   **State Choice:** When LOITER expires, if $\exists i$ such that $N_i < 5$, the predator enters **HUNTING**. Otherwise, it enters **DIVING**.
 4.  **HUNTING vs DIVING Execution:** 
-    *   *Hunting (Targeting Isolation):* The predator calculates the distance to all currently isolated boids: $d_{pj} = \|\vec{x}_p - \vec{x}_j\|$. At *every timestep*, it dynamically asserts its $\vec{x}_{tgt}$ to the coordinate of the isolated boid where $d_{pj}$ is minimized. If the boid rejoins the flock, the predator will instantly snap to the next closest isolated boid.
+    *   *Hunting (Targeting Isolation):* The predator calculates the distance to all currently isolated boids: $d_{pj} = |\vec{x}_p - \vec{x}_j|$. At *every timestep*, it dynamically asserts its $\vec{x}_{tgt}$ to the coordinate of the isolated boid where $d_{pj}$ is minimized. If the boid rejoins the flock, the predator will instantly snap to the next closest isolated boid.
     *   *Diving (Targeting Density):* If no boids are isolated, the predator executes a high-speed plunge to scatter the flock. It finds the absolute closest boid $k$, calculates the subset of boids $V_k$ within $k$'s perception radius, and sets its $\vec{x}_{tgt}$ to the mathematical Center of Mass of that local sub-flock: $\vec{x}_{tgt} = \frac{1}{|V_k|} \sum_{v \in V_k} \vec{x}_v$.
     *   *Dive Completion:* A dive is considered structurally complete when the predator's altitude drops past the target ($z_p < z_{tgt} + 5.0$) while maintaining a negative z-velocity ($v_{pz} < 0$).
-5.  **Capture Mechanics:** At every timestep, the environment computes the 2D pairwise distance matrix between all predators and all boids. If any distance $\|\vec{x}_p - \vec{x}_i\| < r_{catch}$ (where $r_{catch} = 2.0$), boid $i$ is killed. The successful predator instantaneously resets to **VANTAGE**, computing a new random $x,y$ coordinate near the center $L/2$ to climb back toward.
+5.  **Capture Mechanics:** At every timestep, the environment computes the 2D pairwise distance matrix between all predators and all boids. If any distance $|\vec{x}_p - \vec{x}_i| < r_{catch}$ (where $r_{catch} = 2.0$), boid $i$ is killed. The successful predator instantaneously resets to **VANTAGE**, computing a new random $x,y$ coordinate near the center $L/2$ to climb back toward.
 
 **Crucially, the predator does *not* explicitly evaluate the probabilistic "likelihood of capture"** or perform complex path planning (like pure pursuit interception or calculating optimal intercept angles). It utilizes a greedy, instantaneous sensory baseline: steering blindly toward the current coordinate of the closest isolated boid, or the current center-of-mass of the closest dense sub-flock.
 
@@ -69,7 +75,7 @@ To make decisions, each starling $i$ processes a strictly localized 18-dimension
     *   *Local Alignment:* The unit vector of the average velocities of all visible neighbors: $\frac{1}{|N_i|} \sum_{j \in N_i} \vec{v}_j$, subsequently unit-normalized.
     *   *Center of Mass (CoM) Direction:* The unit vector pointing from $\vec{x}_i$ to the mean positional coordinate of visible neighbors.
 *   **Perceptual Threat Matrix:** We designed specific visual proxies for escaping predators:
-    *   Let $\vec{x}_p$ be the position of the closest predator, with distance $d = \|\vec{x}_p - \vec{x}_i\|$.
+    *   Let $\vec{x}_p$ be the position of the closest predator, with distance $d = |\vec{x}_p - \vec{x}_i|$.
     *   Let $\vec{u} = (\vec{x}_p - \vec{x}_i)/d$ be the unit bearing pointing towards the predator.
     *   *Distance:* Normalized distance limited by environmental space, $d / (L/2)$.
     *   *Closing Speed ($v_{close}$):* The scalar rate at which the predator is approaching: $v_{close} = - (\vec{v}_p - \vec{v}_i) \cdot \vec{u}$. This is normalized to $[-1, 1]$ relative to the absolute maximum closure rate $v_{pred} + v_{base}$.
