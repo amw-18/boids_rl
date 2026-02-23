@@ -8,7 +8,7 @@ class StarlingBrain(nn.Module):
     - All starlings share the Actor network (processing local observations).
     - The Centralized Critic processes the global state to solve credit assignment.
     """
-    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 3, hidden_size: int = 64, critic_hidden_size: int = 256):
+    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 4, hidden_size: int = 64, critic_hidden_size: int = 256):
         super().__init__()
         
         # Actor: Shared feature extractor for local observation

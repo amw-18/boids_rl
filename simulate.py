@@ -39,7 +39,7 @@ class RLVision3D:
         self.brain = StarlingBrain(
             obs_dim=18, 
             global_obs_dim=expected_global_obs_dim, 
-            action_dim=3, 
+            action_dim=4, 
             hidden_size=64
         ).to(self.device)
         
@@ -89,9 +89,17 @@ class RLVision3D:
             features = self.brain.actor_feature_extractor(self.obs)
             action_mean = self.brain.actor_mean(features)
             # Use deterministic actions for visualization
-            action = action_mean 
+            action_batch = action_mean 
             
-        self.obs, rewards, dones = self.env.step(action)
+        # Convert batched tensor actions to PettingZoo Dict format
+        # actions_batch is (N, 4)
+        action_dict = {
+            agent: action_batch[i].cpu().numpy() 
+            for i, agent in enumerate(self.env.possible_agents) 
+            if agent in self.env.agents
+        }
+            
+        self.obs, rewards, dones, truncs, infos = self.env.step(action_dict)
         
         # Update Boid scatter plot data (only alive)
         alive = self.env.physics.alive_mask.cpu().numpy()

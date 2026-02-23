@@ -97,21 +97,9 @@ class BoidsPhysics:
             actions: Tensor of shape (num_boids, 3) representing external forces / RL agent actions.
                      This is the primary steering force.
         """
-        # BOUNDARY AVOIDANCE (Soft boundaries)
-        # We still want soft boundaries so the boids don't fly off to infinity
-        boundary_push = torch.zeros_like(self.positions)
-        margin = self.space_size * 0.1  # 10% margin
-        
-        # Lower bounds
-        lower_mask = self.positions < margin
-        boundary_push += lower_mask.float() * (margin - self.positions)
-        
-        # Upper bounds
-        upper_mask = self.positions > (self.space_size - margin)
-        boundary_push -= upper_mask.float() * (self.positions - (self.space_size - margin))
-        
-        # Combine forces
-        total_force = self.boundary_weight * boundary_push
+        # BOUNDARY AVOIDANCE (Soft boundaries removed)
+        # We enforce boundaries purely via RL rewards now (Agent dies if it goes out of bounds)
+        total_force = torch.zeros_like(self.positions)
         
         # Apply external/RL actions if provided
         if actions is not None:

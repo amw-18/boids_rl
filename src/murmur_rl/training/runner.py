@@ -81,7 +81,7 @@ def main():
     # --- 3. Initialize Shared Brain ---
     obs_dim = 18
     global_obs_dim = env.global_obs_dim
-    brain = StarlingBrain(obs_dim=obs_dim, global_obs_dim=global_obs_dim, action_dim=3, hidden_size=64)
+    brain = StarlingBrain(obs_dim=obs_dim, global_obs_dim=global_obs_dim, action_dim=4, hidden_size=64)
     
     start_epoch = 1
     if args.resume:

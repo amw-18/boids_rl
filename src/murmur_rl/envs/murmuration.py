@@ -58,8 +58,11 @@ class MurmurationEnv(ParallelEnv):
         
         # Spaces are defined in NumPy for PettingZoo standard compliance,
         # even though computation is in PyTorch.
+        # Action space: 4D continuous vector
+        # [0, 1, 2] -> 3D Directional heading vector [-1, 1]
+        # [3]       -> Magnitude scaler mapped to [0, 1] then multiplied by max_force
         self.action_spaces = {
-            agent: Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32) for agent in self.possible_agents
+            agent: Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32) for agent in self.possible_agents
         }
         self.observation_spaces = {
             agent: Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32) for agent in self.possible_agents
@@ -95,13 +98,25 @@ class MurmurationEnv(ParallelEnv):
 
         # Convert dictionary of actions to PyTorch tensor
         # Map over possible_agents directly to preserve shape N
-        action_list = [actions.get(agent, np.zeros(3)) for agent in self.possible_agents]
+        # Actions are 4D (Direction X, Y, Z, Magnitude Logit)
+        action_list = [actions.get(agent, np.zeros(4)) for agent in self.possible_agents]
         action_tensor = torch.tensor(np.array(action_list), dtype=torch.float32, device=self.device)
         
-        # Scale normalized actions [-1, 1] to max force bounds
-        action_tensor = action_tensor * self.physics.max_force
+        # Split action into Direction and Magnitude
+        direction = action_tensor[:, 0:3] # (N, 3)
+        magnitude_logit = action_tensor[:, 3:4] # (N, 1)
         
-        self.physics.step(actions=action_tensor)
+        # 1. Normalize Direction to unit vector
+        direction_norm = direction / torch.norm(direction, dim=-1, keepdim=True).clamp(min=1e-5)
+        
+        # 2. Scale Magnitude from logit [-1, 1] to [0, 1] using Sigmoid (or linear scaling)
+        # Using simple linear scaling from [-1, 1] to [0, 1] is standard
+        magnitude_scale = (magnitude_logit + 1.0) / 2.0 
+        
+        # 3. Apply Fmax scale
+        final_force = direction_norm * magnitude_scale * self.physics.max_force
+        
+        self.physics.step(actions=final_force)
         
         self.num_moves += 1
 
@@ -264,15 +279,20 @@ class MurmurationEnv(ParallelEnv):
         # Collision: distance < 1.0 is bad
         collision_count = (dist_matrix < 1.0).sum(dim=1).float()
         
-        # Continuous boundary penalty
+        # Strict Boundary Penalty (Death conditions)
+        # Instead of a soft penalty, going strictly out of bounds is instant death
+        out_of_bounds_mask = (pos[:, 0] < 0) | (pos[:, 0] > self.space_size) | \
+                             (pos[:, 1] < 0) | (pos[:, 1] > self.space_size) | \
+                             (pos[:, 2] < 0) | (pos[:, 2] > self.space_size)
+        
+        # Also maintain a small psychological deterrent for getting too close to the wall
         margin = self.space_size * 0.1
         dist_to_bounds_x = torch.min(pos[:, 0], self.space_size - pos[:, 0]).unsqueeze(1)
         dist_to_bounds_y = torch.min(pos[:, 1], self.space_size - pos[:, 1]).unsqueeze(1)
         dist_to_bounds_z = torch.min(pos[:, 2], self.space_size - pos[:, 2]).unsqueeze(1)
         closest_wall = torch.min(torch.cat([dist_to_bounds_x, dist_to_bounds_y, dist_to_bounds_z], dim=1), dim=1, keepdim=True)[0].squeeze(1)
-        
         penetration = torch.clamp(margin - closest_wall, min=0.0)
-        boundary_penalty = -10.0 * (penetration / margin)
+        boundary_warning_penalty = -5.0 * (penetration / margin)
         
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
@@ -280,8 +300,13 @@ class MurmurationEnv(ParallelEnv):
                  rewards[agent] = 0.0
                  continue
             
-            if not alive[i]:
-                # Death by predator: First time seeing it dead
+            # Check fatal out of bounds
+            is_out_of_bounds = out_of_bounds_mask[i].item()
+            if is_out_of_bounds:
+                 self.physics.alive_mask[i] = False # Kill them in the physics engine so they stop updating
+                 
+            if not alive[i] or is_out_of_bounds:
+                # Death by predator or flying out of bounds: First time seeing it dead
                 rewards[agent] = -100.0
                 self.dead_agents.add(agent)
                 continue
@@ -289,8 +314,8 @@ class MurmurationEnv(ParallelEnv):
             # Stay alive base reward
             rew = 0.1 
             
-            # Add boundary penalty
-            rew += boundary_penalty[i].item()
+            # Add boundary warning penalty
+            rew += boundary_warning_penalty[i].item()
                  
             # Collision penalty
             if collision_count[i] > 0:
