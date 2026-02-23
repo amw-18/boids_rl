@@ -3,6 +3,38 @@ import torch.nn as nn
 from torch.optim import Adam
 import numpy as np
 
+class RunningMeanStd(nn.Module):
+    """Tracks the mean and variance of a tensor."""
+    def __init__(self, epsilon: float = 1e-4, shape: tuple = ()):
+        super().__init__()
+        self.register_buffer("mean", torch.zeros(shape, dtype=torch.float32))
+        self.register_buffer("var", torch.ones(shape, dtype=torch.float32))
+        self.register_buffer("count", torch.tensor(epsilon, dtype=torch.float32))
+
+    def update(self, x: torch.Tensor):
+        batch_mean = x.mean(dim=0)
+        batch_var = x.var(dim=0, unbiased=False)
+        batch_count = x.size(0)
+        
+        delta = batch_mean - self.mean
+        tot_count = self.count + batch_count
+
+        new_mean = self.mean + delta * batch_count / tot_count
+        m_a = self.var * self.count
+        m_b = batch_var * batch_count
+        M2 = m_a + m_b + delta**2 * self.count * batch_count / tot_count
+        new_var = M2 / tot_count
+
+        self.mean = new_mean
+        self.var = new_var
+        self.count = tot_count
+        
+    def normalize(self, x: torch.Tensor):
+        return (x - self.mean) / torch.sqrt(self.var + 1e-8)
+        
+    def denormalize(self, x: torch.Tensor):
+        return x * torch.sqrt(self.var + 1e-8) + self.mean
+
 class PPOTrainer:
     """
     Proximal Policy Optimization (PPO) loop for Parameter-Shared Independent PPO (IPPO).
@@ -14,7 +46,8 @@ class PPOTrainer:
         env,
         brain: nn.Module,
         device: torch.device,
-        lr: float = 3e-4,
+        actor_lr: float = 3e-4,
+        critic_lr: float = 1e-3,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
         clip_coef: float = 0.2,
@@ -27,8 +60,15 @@ class PPOTrainer:
     ):
         self.env = env
         self.brain = brain.to(device)
-        self.optimizer = Adam(self.brain.parameters(), lr=lr, eps=1e-5)
+        self.optimizer = Adam([
+            {'params': self.brain.actor_feature_extractor.parameters(), 'lr': actor_lr},
+            {'params': self.brain.actor_mean.parameters(), 'lr': actor_lr},
+            {'params': [self.brain.actor_logstd], 'lr': actor_lr},
+            {'params': self.brain.critic.parameters(), 'lr': critic_lr}
+        ], eps=1e-5)
         self.device = device
+        
+        self.value_normalizer = RunningMeanStd(shape=()).to(device)
         
         # PPO Hyperparams
         self.gamma = gamma
@@ -65,7 +105,8 @@ class PPOTrainer:
             b_global_obs[step] = global_obs
 
             with torch.no_grad():
-                action, logprob, _, value = self.brain.get_action_and_value(obs, global_obs)
+                action, logprob, _, norm_value = self.brain.get_action_and_value(obs, global_obs)
+                value = self.value_normalizer.denormalize(norm_value)
 
             next_obs, rewards, dones = self.env.step(action)
 
@@ -99,8 +140,8 @@ class PPOTrainer:
         final_obs = rollouts["final_obs"]   # (N, 16) tensor — always present
         final_global_obs = rollouts["final_global_obs"]
         with torch.no_grad():
-            _, _, _, next_value = self.brain.get_action_and_value(final_obs, final_global_obs)
-            next_value = next_value.flatten()
+            _, _, _, norm_next_value = self.brain.get_action_and_value(final_obs, final_global_obs)
+            next_value = self.value_normalizer.denormalize(norm_next_value).flatten()
 
         advantages = torch.zeros_like(rewards)
         lastgaelam = 0
@@ -125,6 +166,7 @@ class PPOTrainer:
         b_global_obs = rollouts["global_obs"]
         b_actions = rollouts["actions"]
         b_logprobs = rollouts["logprobs"]
+        b_values = rollouts["values"]
         
         b_advantages, b_returns = self.compute_advantages(rollouts)
         
@@ -144,6 +186,16 @@ class PPOTrainer:
         
         mb_advantages = b_advantages[valid_mask]
         mb_returns = b_returns[valid_mask]
+        
+        # Calculate explained variance using unnormalized values and returns
+        y_pred = b_values[valid_mask].cpu().numpy()
+        y_true = mb_returns.cpu().numpy()
+        var_y = np.var(y_true)
+        explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        
+        # Update the value normalizer target statistics and generate normalized returns for training
+        self.value_normalizer.update(mb_returns)
+        mb_returns_norm = self.value_normalizer.normalize(mb_returns)
         
         # Normalize advantages based ONLY on valid active transitions
         mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
@@ -172,7 +224,7 @@ class PPOTrainer:
                 mini_global_obs = mb_global_obs[mb_inds]
                 mini_actions = mb_actions[mb_inds]
                 mini_advantages = mb_advantages[mb_inds]
-                mini_returns = mb_returns[mb_inds]
+                mini_returns_norm = mb_returns_norm[mb_inds]
                 mini_logprobs = mb_logprobs[mb_inds]
                 
                 _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mini_obs, mini_global_obs, mini_actions)
@@ -184,8 +236,8 @@ class PPOTrainer:
                 pg_loss2 = -mini_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
                 
-                # Value Loss
-                v_loss = 0.5 * ((newvalue.flatten() - mini_returns) ** 2).mean()
+                # Value Loss: MSE against NORMALIZED returns
+                v_loss = 0.5 * ((newvalue.flatten() - mini_returns_norm) ** 2).mean()
                 
                 # Calculate approximate KL divergence for early stopping
                 with torch.no_grad():
@@ -212,4 +264,4 @@ class PPOTrainer:
                 break
                 
         # Return MEAN losses across all minibatches, not just the very last one
-        return np.mean(epoch_pg_losses), np.mean(epoch_v_losses), np.mean(epoch_entropies), mb_returns.mean().item()
+        return np.mean(epoch_pg_losses), np.mean(epoch_v_losses), np.mean(epoch_entropies), mb_returns.mean().item(), explained_var
