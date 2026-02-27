@@ -30,6 +30,9 @@ class VectorMurmurationEnv:
         space_size=100.0,
         perception_radius=10.0,
         device="cpu",
+        gamma=0.99,
+        pbrs_k=1.0,
+        pbrs_c=1.0,
     ):
         self.n_agents = num_agents
         self.num_predators = num_predators
@@ -62,6 +65,11 @@ class VectorMurmurationEnv:
         self._death_penalty = torch.tensor(-100.0, device=self.device)
         self._zero = torch.tensor(0.0, device=self.device)
         self._inf = torch.tensor(float("inf"), device=self.device)
+
+        self._gamma = torch.tensor(gamma, device=self.device)
+        self._pbrs_k = torch.tensor(pbrs_k, device=self.device)
+        self._pbrs_c = torch.tensor(pbrs_c, device=self.device)
+        self.last_potential = torch.zeros(num_agents, device=self.device)
 
         # Diagonal mask for cdist — avoids in-place fill_diagonal_ which breaks torch.compile
         self._diag_mask = torch.eye(num_agents, dtype=torch.bool, device=self.device)
@@ -102,6 +110,7 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.physics.reset()
         self._dead_mask.zero_()
+        _, _, self.last_potential = self._get_rewards()
         return self._get_observations()
 
     def step(self, actions: torch.Tensor):
@@ -118,7 +127,12 @@ class VectorMurmurationEnv:
         self.num_moves += 1
 
         obs = self._get_observations()
-        rewards, new_deaths = self._get_rewards()
+        rewards, new_deaths, new_potential = self._get_rewards()
+
+        # PBRS shaping
+        shaping = (self._gamma * new_potential) - self.last_potential
+        rewards += shaping
+        self.last_potential = new_potential.clone()
 
         # Update persistent death mask
         self._dead_mask |= new_deaths
@@ -270,8 +284,9 @@ class VectorMurmurationEnv:
     def _get_rewards(self):
         """
         Returns:
-            rewards:    (N,) float tensor
-            new_deaths: (N,) bool tensor — agents that NEWLY died this step
+            rewards:       (N,) float tensor
+            new_deaths:    (N,) bool tensor — agents that NEWLY died this step
+            new_potential: (N,) float tensor — PBRS potential
         """
         pos = self.physics.positions
         alive = self.physics.alive_mask
@@ -293,32 +308,19 @@ class VectorMurmurationEnv:
         killed_by_predator = ~alive & ~self._dead_mask  # newly killed by predator
         new_deaths = killed_by_predator
 
-        # Continuous boundary penalty
-        margin = self.space_size * 0.1
+        # Potential-Based Reward Shaping (PBRS)
         
-        # Original XY boundaries
-        dist_lo_xy = pos[:, :2]
-        dist_hi_xy = self.space_size - pos[:, :2]
-        closest_wall_xy = torch.min(dist_lo_xy, dist_hi_xy).min(dim=1).values
-        penetration_xy = torch.clamp(margin - closest_wall_xy, min=0.0)
-        boundary_penalty_xy = -10.0 * (penetration_xy / margin)
+        # 1. Boundary Potential (phi_bounds)
+        pos_relative = (pos - self._half_space) / self._half_space
+        d_center_sq = (pos_relative**2).sum(dim=-1)
+        phi_bounds = -self._pbrs_k * d_center_sq
         
-        # New Z-bound penalty (Floor=0, Ceiling=0.85)
-        z_pos = pos[:, 2]
-        ceiling = self.space_size * 0.85
-        dist_lo_z = z_pos
-        dist_hi_z = ceiling - z_pos
+        # 2. Density Potential (phi_density)
+        in_radius = dist_matrix < self.perception_radius
+        local_density = in_radius.float().sum(dim=1) / self.n_agents
+        phi_density = self._pbrs_c * local_density
         
-        # Penalize approaching the floor or the lowered ceiling
-        closest_wall_z = torch.min(dist_lo_z, dist_hi_z)
-        penetration_z = torch.clamp(margin - closest_wall_z, min=0.0)
-        
-        # Make the ceiling penalty much steeper to discourage hiding near predators
-        is_ceiling = dist_hi_z < dist_lo_z
-        penalty_z_mult = torch.where(is_ceiling, 20.0, 10.0)
-        boundary_penalty_z = -penalty_z_mult * (penetration_z / margin)
-        
-        boundary_penalty = boundary_penalty_xy + boundary_penalty_z
+        new_potential = phi_bounds + phi_density
 
         # --- Compute rewards vectorised ---
         # Base survival reward
@@ -327,13 +329,13 @@ class VectorMurmurationEnv:
         # Collision penalty
         rewards -= 2.0 * collision_count
 
-        # Apply continuous boundary penalty
-        rewards += boundary_penalty
-
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)
 
         # Already-dead agents get 0
         rewards = torch.where(self._dead_mask, self._zero, rewards)
 
-        return rewards, new_deaths
+        # Terminal states must have 0 potential
+        new_potential = torch.where(self._dead_mask | new_deaths, self._zero, new_potential)
+
+        return rewards, new_deaths, new_potential

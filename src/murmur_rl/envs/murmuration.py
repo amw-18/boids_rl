@@ -17,13 +17,17 @@ class MurmurationEnv(ParallelEnv):
         "name": "murmuration_v0"
     }
 
-    def __init__(self, num_agents=50, num_predators=5, space_size=100.0, perception_radius=10.0, device='cpu'):
+    def __init__(self, num_agents=50, num_predators=5, space_size=100.0, perception_radius=10.0, device='cpu', gamma=0.99, pbrs_k=1.0, pbrs_c=1.0):
         super().__init__()
         self.n_agents = num_agents
         self.num_predators = num_predators
         self.space_size = space_size
         self.perception_radius = perception_radius
         self.device = torch.device(device)
+        self.gamma = gamma
+        self.pbrs_k = pbrs_k
+        self.pbrs_c = pbrs_c
+        self.last_potential = {}
         
         self.possible_agents = [f"boid_{i}" for i in range(num_agents)]
         self.agents = self.possible_agents[:]
@@ -81,6 +85,10 @@ class MurmurationEnv(ParallelEnv):
         self.physics.reset() # Reset positions and velocities on GPU
         self.dead_agents = set() # Track who is newly dead
         
+        # Generate initial potentials
+        _, initial_potentials = self._get_rewards()
+        self.last_potential = initial_potentials
+        
         # Generate initial observations
         observations = self._get_observations()
         infos = {agent: {} for agent in self.possible_agents}
@@ -107,7 +115,16 @@ class MurmurationEnv(ParallelEnv):
 
         # Calculate rewards and observations
         observations = self._get_observations()
-        rewards = self._get_rewards()
+        base_rewards, new_potentials = self._get_rewards()
+        
+        rewards = {}
+        for agent in self.possible_agents:
+            if agent in self.dead_agents and agent not in base_rewards:
+                rewards[agent] = base_rewards.get(agent, 0.0)
+            else:
+                shaping = (self.gamma * new_potentials[agent]) - self.last_potential.get(agent, 0.0)
+                rewards[agent] = base_rewards[agent] + shaping
+            self.last_potential[agent] = new_potentials[agent]
         
         # Truncate after 500 steps
         env_truncation = self.num_moves >= 500
@@ -242,12 +259,12 @@ class MurmurationEnv(ParallelEnv):
         """
         Biological Phase 4 Reward:
         1. Survival Reward (+)
-        2. Death Penalty (-) (Predator catch or wall hit)
-        3. Social Proximity Reward (+) 
-        4. Collision Penalty (-)
-        5. Energy penalty (-) (assuming NN outputs force mapped later, currently implicit)
+        2. Death Penalty (-) (Predator catch)
+        3. Collision Penalty (-)
+        4. Potential-Based Reward Shaping (PBRS) bounds & density
         """
         rewards = {}
+        potentials = {}
         pos = self.physics.positions
         alive = self.physics.alive_mask
         
@@ -255,78 +272,49 @@ class MurmurationEnv(ParallelEnv):
         dist_matrix = torch.cdist(pos, pos)
         dist_matrix.fill_diagonal_(float('inf'))
         
-        nearest_dist, _ = torch.min(dist_matrix, dim=1)
-        
-        # Social: how many neighbors in comfortable radius (e.g., between 2.0 and 10.0)
-        comfortable_mask = (dist_matrix > 2.0) & (dist_matrix <= self.perception_radius)
-        social_count = comfortable_mask.sum(dim=1).float()
-        
         # Collision: distance < 1.0 is bad
         collision_count = (dist_matrix < 1.0).sum(dim=1).float()
         
-        # Strict Boundary Penalty (Death conditions)
-        # Instead of a soft penalty, going strictly out of bounds is instant death
-        out_of_bounds_mask = (pos[:, 0] < 0) | (pos[:, 0] > self.space_size) | \
-                             (pos[:, 1] < 0) | (pos[:, 1] > self.space_size) | \
-                             (pos[:, 2] < 0) | (pos[:, 2] > self.space_size)
-        
-        # Continuous boundary penalty
-        margin = self.space_size * 0.1
-        
-        # Original XY boundaries
-        dist_lo_xy = pos[:, :2]
-        dist_hi_xy = self.space_size - pos[:, :2]
-        closest_wall_xy = torch.min(dist_lo_xy, dist_hi_xy).min(dim=1).values
-        penetration_xy = torch.clamp(margin - closest_wall_xy, min=0.0)
-        boundary_penalty_xy = -10.0 * (penetration_xy / margin)
-        
-        # New Z-bound penalty (Floor=0, Ceiling=0.85)
-        z_pos = pos[:, 2]
-        ceiling = self.space_size * 0.85
-        dist_lo_z = z_pos
-        dist_hi_z = ceiling - z_pos
-        
-        # Penalize approaching the floor or the lowered ceiling
-        closest_wall_z = torch.min(dist_lo_z, dist_hi_z)
-        penetration_z = torch.clamp(margin - closest_wall_z, min=0.0)
-        
-        # Make the ceiling penalty much steeper to discourage hiding near predators
-        is_ceiling = dist_hi_z < dist_lo_z
-        penalty_z_mult = torch.where(is_ceiling, 20.0, 10.0)
-        boundary_penalty_z = -penalty_z_mult * (penetration_z / margin)
-        
-        boundary_warning_penalty = (boundary_penalty_xy + boundary_penalty_z).unsqueeze(1)
+        # Density for PBRS
+        dist_matrix_masked = dist_matrix.clone()
+        dist_matrix_masked.masked_fill_(~alive.unsqueeze(0), float('inf'))
+        in_radius_mask = (dist_matrix_masked < self.perception_radius) & alive.unsqueeze(0)
+        local_density = in_radius_mask.sum(dim=1).float() / self.n_agents
         
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
                  # Already processed the death in a previous frame
                  rewards[agent] = 0.0
+                 potentials[agent] = 0.0
                  continue
             
-            # Check fatal out of bounds
-            is_out_of_bounds = out_of_bounds_mask[i].item()
-            if is_out_of_bounds:
-                 self.physics.alive_mask[i] = False # Kill them in the physics engine so they stop updating
-                 
-            if not alive[i] or is_out_of_bounds:
-                # Death by predator or flying out of bounds: First time seeing it dead
+            if not alive[i]:
+                # Death by predator: First time seeing it dead
                 rewards[agent] = -100.0
+                potentials[agent] = 0.0
                 self.dead_agents.add(agent)
                 continue
                 
             # Stay alive base reward
             rew = 0.1 
-            
-            # Add boundary warning penalty
-            rew += boundary_warning_penalty[i].item()
                  
             # Collision penalty
             if collision_count[i] > 0:
                  rew -= 2.0 * collision_count[i].item()
                  
+            # PBRS Potentials
+            rel_x = (pos[i, 0] - self.space_size / 2.0) / (self.space_size / 2.0)
+            rel_y = (pos[i, 1] - self.space_size / 2.0) / (self.space_size / 2.0)
+            rel_z = (pos[i, 2] - self.space_size / 2.0) / (self.space_size / 2.0)
+            
+            d_center_sq = rel_x**2 + rel_y**2 + rel_z**2
+            phi_bounds = -self.pbrs_k * d_center_sq.item()
+            phi_density = self.pbrs_c * local_density[i].item()
+            
+            potentials[agent] = phi_bounds + phi_density
             rewards[agent] = rew
              
-        return rewards
+        return rewards, potentials
 
     def render(self):
         pass

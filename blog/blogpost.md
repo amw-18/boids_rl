@@ -74,12 +74,16 @@ To make decisions, each starling $i$ processes a strictly localized 18-dimension
     *   *Looming (Time-to-Collision Proxy):* The rate of optical expansion of the predator on the retina, mathematically formulated as $\text{loom} = v_{close} / \max(d, \epsilon)$. It is strictly clamped to prevent numerical explosions when $d \to 0$.
     *   *Bearing (In Front?):* The dot product of the boid's heading and the predator's bearing, $\hat{v}_i \cdot \vec{u}$.
 
-### Reward Function: Structure over Strategy
-The core philosophy of our approach is that **flocking is not explicitly rewarded**. The reward function attempts to reflect pure structural and biological endpoints:
-*   **Survival:** $+0.1$ for every frame survived without capture.
-*   **Death Penalty (Predator or Bounds):** First-time transition to the "dead" state via predator capture incurs a stark terminal $-100.0$ penalty. Furthermore, we enforce **Purist RL Constraints**: there are no invisible physical walls pushing boids back inside the environment. If a boid flies strictly out of bounds ($x,y,z \notin [0, L]$), it is considered a fatal crash. The agent's episode terminates, and it immediately receives the same massive $-100.0$ death penalty.
-*   **Collision Penalty:** To implicitly enforce the instinctual "Separation" rule, collisions with peers ($d < 1.0$) incur a $-2.0$ penalty per peer per frame.
-*   **Boundary Warning:** Penetrating the soft boundary margin ($10\%$ of space length) incurs a scaling geometric penalty up to $-5.0$ proportional to boundary penetration, providing a psychological deterrent before the fatal crash at $0$.
+### Reward Function: Potential-Based Reward Shaping (PBRS)
+The core philosophy of our approach is that **flocking is not explicitly rewarded**. However, initial experiments revealed a pathological "fear of the edge" where massive terminal penalties for boundary violations paralyzed exploration. To mathematically eliminate this without corrupting the optimal survival policy, we utilize **Potential-Based Reward Shaping (PBRS)**.
+
+The reward scheme now utilizes dense spatial potentials:
+*   **Survival:** $+0.1$ base reward for every frame survived without capture.
+*   **Death Penalty (Predators Only):** First-time transition to the "dead" state via predator capture incurs a stark terminal $-100.0$ penalty. The fatal out-of-bounds crash penalty has been removed in favor of continuous spatial potentials.
+*   **Collision Penalty:** To implicitly enforce the instinctual "Separation" rule, peer collisions ($d < 1.0$) incur a $-2.0$ penalty.
+*   **Boundary Potential ($\Phi_{bounds}$):** Instead of invisible walls or terminal deaths, we apply a continuous potential function that scales with the squared distance from the environment's center: $\Phi_{bounds}(s) = -k \cdot (d_{center})^2$. This safely herds agents inward without destroying learning gradients.
+*   **Density Potential ($\Phi_{density}$):** To accelerate the discovery of murmuration Nash Equilibria without hardcoding Boid rules, agents receive dense reinforcement to move toward localized clusters of peers: $\Phi_{density}(s) = c \cdot \rho_i$.
+*   **PBRS Integration:** The final shaping reward added to the environment is mathematically strictly defined as $F(s, a, s') = \gamma \Phi(s') - \Phi(s)$, guaranteeing optimal policy invariance while providing dense guidance.
 
 ### Neural Architecture: MAPPO
 We utilize Multi-Agent Proximal Policy Optimization (MAPPO), an actor-critic algorithm highly suited for multi-agent swarm environments.
