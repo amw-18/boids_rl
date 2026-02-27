@@ -48,9 +48,17 @@ def main():
     use_wandb = False
     if not args.no_wandb:
         try:
+            # Check for worker-injected variables
+            run_id = os.environ.get("WANDB_RUN_ID")
+            run_group = os.environ.get("WANDB_RUN_GROUP", "local_dev")
+            run_name = os.environ.get("WANDB_NAME", "ppo_continuous_run_cuda_fast1")
+            
             wandb.init(
                 project="murmur_rl",
-                name="ppo_continuous_run_cuda_fast1",
+                id=run_id,           # allows resuming this run later for evaluations
+                resume="allow",
+                name=run_name,
+                group=run_group,
                 config=config,
                 mode="online"
             )
@@ -238,6 +246,28 @@ def main():
             torch.save(boid_brain.state_dict(), boid_chkpt_path)
             torch.save(pred_brain.state_dict(), pred_chkpt_path)
             print(f"Saved Checkpoints: {boid_chkpt_path} & {pred_chkpt_path}")
+            
+            # --- Artifact Generation & Logging ---
+            if use_wandb:
+                print(f"Generating Evaluation Video for epoch {epoch}...")
+                video_path = f"{args.checkpoints_dir}/eval_ep{epoch}.mp4"
+                try:
+                    import subprocess
+                    subprocess.check_call([
+                        "uv", "run", "python", "simulate.py",
+                        "--checkpoint", chkpt_path,
+                        "--save", video_path,
+                        "--frames", "300" # render enough frames for a 10s clip
+                    ])
+                    # Log to wandb
+                    wandb.log({
+                        "video/checkpoint": wandb.Video(video_path, fps=30, format="mp4"),
+                        "epoch": epoch
+                    })
+                    print(f"Logged {video_path} to current W&B Run.")
+                except Exception as e:
+                    print(f"Failed to generate or log evaluation video: {e}")
+                    
             
         # Explicit Memory Management for Apple Silicon
         # MPS aggressively caches tensor allocations, which looks like a giant RAM leak
