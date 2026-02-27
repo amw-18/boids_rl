@@ -39,21 +39,17 @@ At each timestep $\Delta t = 0.1$, the environment processes updates in the foll
 39: 
 40: 4.  **Constant Position Update:** Finally, positions are updated natively via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$. By stripping away unnatural static velocity assignments, agents must learn to regulate their own speed inline with their turning radii and survival needs.
 
-### The Predator Mechanics: The Falcon State Machine
-To introduce realistic, dynamic survival pressure, we designed "Falcon" predator agents governed by a robust, non-differentiable state machine. Predators fly faster ($1.5 \times v_{base}$) and turn tighter ($1.5 \times \theta_{max}$) than boids. Their behavior loops through four strict states:
+### The Predator Mechanics: Co-Evolution and Visual Obfuscation
+To introduce realistic, dynamic survival pressure without generating exploitable mathematical thresholds, we transitioned the environment to a **Multi-Agent Competitive Co-Evolution** framework. The Predators are not governed by static rules; they are independent Reinforcement Learning agents trained simultaneously against the Starlings in a zero-sum Markov Game.
 
-1.  **VANTAGE (0):** The predator spawns and flies upwards to a height of $z \ge 0.9L$ (where $L$ is the boundary length). Upon reaching the vantage altitude, it holds its altitude and waits for a fixed `reset_duration` (50 timesteps) to survey the flock before transitioning.
-2.  **LOITER (3):** The predator wanders randomly above the flock at 30% of its top speed for a highly variant duration ($100 + \mathcal{U}(0, 300)$ timesteps). During this phase, it constantly evaluates the positional structure of the flock below.
-3.  **Target Selection & Evaluation:** At every single timestep during the HUNTING and DIVING states, the predator evaluates the flock to dynamically update its target $\vec{x}_{tgt}$.
-    *   **Isolation Metric:** For every alive boid $i$, the environment calculates a neighborhood density: $N_i = \sum_{j \neq i} \mathbb{I}(|\vec{x}_i - \vec{x}_j| < r_{percept})$. A boid is considered mathematically "isolated" if $N_i < N_{min}$ (where $N_{min} = 5$).
-    *   **State Choice:** When LOITER expires, if $\exists i$ such that $N_i < 5$, the predator enters **HUNTING**. Otherwise, it enters **DIVING**.
-4.  **HUNTING vs DIVING Execution:** 
-    *   *Hunting (Targeting Isolation):* The predator calculates the distance to all currently isolated boids: $d_{pj} = |\vec{x}_p - \vec{x}_j|$. At *every timestep*, it dynamically asserts its $\vec{x}_{tgt}$ to the coordinate of the isolated boid where $d_{pj}$ is minimized. If the boid rejoins the flock, the predator will instantly snap to the next closest isolated boid.
-    *   *Diving (Targeting Density):* If no boids are isolated, the predator executes a high-speed plunge to scatter the flock. It finds the absolute closest boid $k$, calculates the subset of boids $V_k$ within $k$'s perception radius, and sets its $\vec{x}_{tgt}$ to the mathematical Center of Mass of that local sub-flock: $\vec{x}_{tgt} = \frac{1}{|V_k|} \sum_{v \in V_k} \vec{x}_v$.
-    *   *Dive Completion:* A dive is considered structurally complete when the predator's altitude drops past the target ($z_p < z_{tgt} + 5.0$) while maintaining a negative z-velocity ($v_{pz} < 0$).
-5.  **Capture Mechanics:** At every timestep, the environment computes the 2D pairwise distance matrix between all predators and all boids. If any distance $|\vec{x}_p - \vec{x}_i| < r_{catch}$ (where $r_{catch} = 2.0$), boid $i$ is killed. The successful predator instantaneously resets to **VANTAGE**, computing a new random $x,y$ coordinate near the center $L/2$ to climb back toward.
+Instead of a state machine, Predators fly using identical 6-DOF continuous actions (Thrust, Roll Rate, Pitch Rate) but are equipped with physical advantages ($1.5 \times v_{base}$ and $1.5 \times \theta_{max}$) and stamina mechanics. Sprinting drains their energy, forcing periodic cruising.
 
-**Crucially, the predator does *not* explicitly evaluate the probabilistic "likelihood of capture"** or perform complex path planning (like pure pursuit interception or calculating optimal intercept angles). It utilizes a greedy, instantaneous sensory baseline: steering blindly toward the current coordinate of the closest isolated boid, or the current center-of-mass of the closest dense sub-flock.
+To biologically prevent the Predators from overpowering the Starlings via pure speed, we engineered a core psychological mechanic: **Visual Obfuscation**.
+1. **Perception Noise**: When a Predator observes its 5 closest Starling targets, the environment calculates each target's local flock density $\rho_i$. 
+2. **Dynamic Degradation**: We inject Gaussian Noise $\mathcal{N}(0, \sigma^2)$ scaled by this density ($\sigma = k \cdot \rho_i$) into the Predator's observation vector.
+3. **Nash Equilibrium**: An isolated Starling provides mathematically perfect coordinates. A deeply nested Starling provides wildly fluctuating, useless tracking data.
+
+This continuous gradient mathematically enforces the Nash Equilibrium of flocking. The Starlings must learn to compress radially to blind the Predator's neural network, while the Predator must learn to maximize stamina and attack the fringes where visual noise is minimized.
 
 ### Observation Space: Biological Perception
 To make decisions, each starling $i$ processes a strictly localized 18-dimensional continuous observation vector. This simulates limited biological senses over a `perception_radius` of 15.0 units.

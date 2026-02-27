@@ -35,18 +35,20 @@ class RunningMeanStd(nn.Module):
     def denormalize(self, x: torch.Tensor):
         return x * torch.sqrt(self.var + 1e-8) + self.mean
 
-class PPOTrainer:
+class AlternatingCoevolutionTrainer:
     """
-    Proximal Policy Optimization (PPO) loop for Parameter-Shared Independent PPO (IPPO).
-    Every starling shares the same network weights, meaning we pool their 
-    experiences together to train the central brain.
+    Co-Evolutionary Proximal Policy Optimization (PPO) loop.
+    Manages two completely decoupled PPO networks (Starlings vs Predators)
+    competing in a zero-sum, asymmetric game.
     """
     def __init__(
         self,
         env,
-        brain: nn.Module,
+        boid_brain: nn.Module,
+        pred_brain: nn.Module,
         device: torch.device,
-        actor_lr: float = 3e-4,
+        boid_actor_lr: float = 3e-4, # Higher LR for prey to learn faster initially
+        pred_actor_lr: float = 1e-4, # Lower LR for predators to prevent early collapse
         critic_lr: float = 1e-3,
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
@@ -60,16 +62,27 @@ class PPOTrainer:
         stacked_frames: int = 3
     ):
         self.env = env
-        self.brain = brain.to(device)
-        self.optimizer = Adam([
-            {'params': self.brain.actor_feature_extractor.parameters(), 'lr': actor_lr},
-            {'params': self.brain.actor_mean.parameters(), 'lr': actor_lr},
-            {'params': [self.brain.actor_logstd], 'lr': actor_lr},
-            {'params': self.brain.critic.parameters(), 'lr': critic_lr}
-        ], eps=1e-5)
         self.device = device
         
-        self.value_normalizer = RunningMeanStd(shape=()).to(device)
+        # --- Boid (Starling) Population ---
+        self.boid_brain = boid_brain.to(device)
+        self.boid_optimizer = Adam([
+            {'params': self.boid_brain.actor_feature_extractor.parameters(), 'lr': boid_actor_lr},
+            {'params': self.boid_brain.actor_mean.parameters(), 'lr': boid_actor_lr},
+            {'params': [self.boid_brain.actor_logstd], 'lr': boid_actor_lr},
+            {'params': self.boid_brain.critic.parameters(), 'lr': critic_lr}
+        ], eps=1e-5)
+        self.boid_value_norm = RunningMeanStd(shape=()).to(device)
+        
+        # --- Predator (Falcon) Population ---
+        self.pred_brain = pred_brain.to(device)
+        self.pred_optimizer = Adam([
+            {'params': self.pred_brain.actor_feature_extractor.parameters(), 'lr': pred_actor_lr},
+            {'params': self.pred_brain.actor_mean.parameters(), 'lr': pred_actor_lr},
+            {'params': [self.pred_brain.actor_logstd], 'lr': pred_actor_lr},
+            {'params': self.pred_brain.critic.parameters(), 'lr': critic_lr}
+        ], eps=1e-5)
+        self.pred_value_norm = RunningMeanStd(shape=()).to(device)
         
         # PPO Hyperparams
         self.gamma = gamma
@@ -85,159 +98,167 @@ class PPOTrainer:
 
     def collect_rollouts(self, num_steps=200):
         """
-        Run the environment for `num_steps`, collecting (obs, actions,
-        log_probs, rewards, values) as on-device tensors — no dicts, no numpy.
+        Run the environment for `num_steps`, collecting joint experience for both populations simultaneously.
         """
-        obs = self.env.reset()                      # (N, obs_dim) tensor on device
-        global_obs = self.env.get_global_state(obs)
+        obs_boids, obs_preds = self.env.reset()
+        global_obs_boids = self.env.get_global_state(obs_boids)
+        global_obs_preds = self.env.get_global_state(obs_preds)
 
         N = self.env.n_agents
+        P = self.env.num_predators
         
-        # Initialize rolling frame buffers for POMDP resolution
-        rolling_obs = obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
-        rolling_global_obs = global_obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        # Buffers
+        roll_obs_boids = obs_boids.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        roll_global_boids = global_obs_boids.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        
+        roll_obs_preds = obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        roll_global_preds = global_obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
 
-        actual_global_obs_dim = global_obs.shape[-1]
-        
-        # Pre-allocate buffers
-        b_obs      = torch.empty((num_steps, N, self.stacked_frames * self.env.obs_dim), device=self.device)
-        b_global_obs = torch.empty((num_steps, N, self.stacked_frames * actual_global_obs_dim), device=self.device)
-        b_actions  = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
-        b_logprobs = torch.empty((num_steps, N), device=self.device)
-        b_rewards  = torch.empty((num_steps, N), device=self.device)
-        b_dones    = torch.empty((num_steps, N), device=self.device)
-        b_values   = torch.empty((num_steps, N), device=self.device)
+        b_obs       = torch.empty((num_steps, N, self.stacked_frames * obs_boids.shape[-1]), device=self.device)
+        b_globs     = torch.empty((num_steps, N, self.stacked_frames * global_obs_boids.shape[-1]), device=self.device)
+        b_acts      = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
+        b_logps     = torch.empty((num_steps, N), device=self.device)
+        b_rews      = torch.empty((num_steps, N), device=self.device)
+        b_dones     = torch.empty((num_steps, N), device=self.device)
+        b_vals      = torch.empty((num_steps, N), device=self.device)
+
+        p_obs       = torch.empty((num_steps, P, self.stacked_frames * obs_preds.shape[-1]), device=self.device)
+        p_globs     = torch.empty((num_steps, P, self.stacked_frames * global_obs_preds.shape[-1]), device=self.device)
+        p_acts      = torch.empty((num_steps, P, self.env.action_dim), device=self.device)
+        p_logps     = torch.empty((num_steps, P), device=self.device)
+        p_rews      = torch.empty((num_steps, P), device=self.device)
+        p_dones     = torch.empty((num_steps, P), device=self.device) # Predators don't die, but we track epoch end
+        p_vals      = torch.empty((num_steps, P), device=self.device)
 
         for step in range(num_steps):
             if step > 0:
-                global_obs = self.env.get_global_state(obs)
-                # Shift frames left and insert new frame at the end
-                rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
-                rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
+                global_obs_boids = self.env.get_global_state(obs_boids)
+                global_obs_preds = self.env.get_global_state(obs_preds)
+                
+                roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
+                roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
+                
+                roll_obs_preds = torch.cat([roll_obs_preds[:, 1:, :], obs_preds.unsqueeze(1)], dim=1)
+                roll_global_preds = torch.cat([roll_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
 
-            flat_obs = rolling_obs.view(N, -1)
-            flat_global_obs = rolling_global_obs.view(N, -1)
+            flat_obs_boids = roll_obs_boids.view(N, -1)
+            flat_globs_boids = roll_global_boids.view(N, -1)
+            flat_obs_preds = roll_obs_preds.view(P, -1)
+            flat_globs_preds = roll_global_preds.view(P, -1)
             
-            b_obs[step] = flat_obs
-            b_global_obs[step] = flat_global_obs
+            b_obs[step], b_globs[step] = flat_obs_boids, flat_globs_boids
+            p_obs[step], p_globs[step] = flat_obs_preds, flat_globs_preds
 
             with torch.no_grad():
-                action, logprob, _, norm_value = self.brain.get_action_and_value(flat_obs, flat_global_obs)
-                value = self.value_normalizer.denormalize(norm_value)
+                # Boid Actions
+                b_action, b_logp, _, b_nv = self.boid_brain.get_action_and_value(flat_obs_boids, flat_globs_boids)
+                b_value = self.boid_value_norm.denormalize(b_nv)
+                
+                # Predator Actions
+                p_action, p_logp, _, p_nv = self.pred_brain.get_action_and_value(flat_obs_preds, flat_globs_preds)
+                p_value = self.pred_value_norm.denormalize(p_nv)
 
-            next_obs, rewards, dones = self.env.step(action)
+            next_obs_boids, next_obs_preds, rewards_boids, rewards_preds, dones_boids = self.env.step(
+                boid_actions=b_action, predator_actions=p_action
+            )
 
-            b_actions[step]  = action
-            b_logprobs[step] = logprob
-            b_rewards[step]  = rewards
-            b_dones[step]    = dones.float()
-            b_values[step]   = value.flatten()
+            b_acts[step], b_logps[step], b_rews[step], b_dones[step], b_vals[step] = b_action, b_logp, rewards_boids, dones_boids.float(), b_value.flatten()
             
-            # Flush history for agents that died to prevent carrying over dead state momentum
-            if dones.any():
-                dead_mask = dones.bool()
-                rolling_obs[dead_mask] = next_obs[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
-                # Next iteration's global obs will be fetched at the start of the next step
+            # Predators are immortal currently, so dones is False unless truncated
+            p_dones_val = torch.zeros(P, device=self.device)
+            if torch.all(dones_boids):
+                p_dones_val.fill_(1.0) # Episode over for predators too if all boids dead/truncated
+                
+            p_acts[step], p_logps[step], p_rews[step], p_dones[step], p_vals[step] = p_action, p_logp, rewards_preds, p_dones_val, p_value.flatten()
+            
+            # Flush dead boid history
+            if dones_boids.any():
+                dead_mask = dones_boids.bool()
+                roll_obs_boids[dead_mask] = next_obs_boids[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
 
-            obs = next_obs
+            obs_boids, obs_preds = next_obs_boids, next_obs_preds
 
-        # Prepare final rolled frames for GAE bootstrapping
-        global_obs = self.env.get_global_state(obs)
-        rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
-        rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
+        # Final Bootstrapping
+        global_obs_boids = self.env.get_global_state(obs_boids)
+        roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
+        roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
+        
+        global_obs_preds = self.env.get_global_state(obs_preds)
+        roll_obs_preds = torch.cat([roll_obs_preds[:, 1:, :], obs_preds.unsqueeze(1)], dim=1)
+        roll_global_preds = torch.cat([roll_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
 
-        return {
-            "obs":      b_obs,
-            "global_obs": b_global_obs,
-            "actions":  b_actions,
-            "logprobs": b_logprobs,
-            "rewards":  b_rewards,
-            "dones":    b_dones,
-            "values":   b_values,
-            "final_obs": rolling_obs.view(N, -1),
-            "final_global_obs": rolling_global_obs.view(N, -1),
+        boid_rollouts = {
+            "obs": b_obs, "global_obs": b_globs, "actions": b_acts, "logprobs": b_logps,
+            "rewards": b_rews, "dones": b_dones, "values": b_vals,
+            "final_obs": roll_obs_boids.view(N, -1), "final_global_obs": roll_global_boids.view(N, -1)
+        }
+        
+        pred_rollouts = {
+            "obs": p_obs, "global_obs": p_globs, "actions": p_acts, "logprobs": p_logps,
+            "rewards": p_rews, "dones": p_dones, "values": p_vals,
+            "final_obs": roll_obs_preds.view(P, -1), "final_global_obs": roll_global_preds.view(P, -1)
         }
 
-    def compute_advantages(self, rollouts):
-        """Generalized Advantage Estimation (GAE) across all agents simultaneously."""
+        return boid_rollouts, pred_rollouts
+
+    def compute_advantages(self, rollouts, brain, value_normalizer):
         rewards = rollouts["rewards"]
         dones   = rollouts["dones"]
         values  = rollouts["values"]
 
-        # Bootstrap value for next step
-        final_obs = rollouts["final_obs"]   # (N, 16) tensor — always present
-        final_global_obs = rollouts["final_global_obs"]
         with torch.no_grad():
-            _, _, _, norm_next_value = self.brain.get_action_and_value(final_obs, final_global_obs)
-            next_value = self.value_normalizer.denormalize(norm_next_value).flatten()
+            _, _, _, norm_next_value = brain.get_action_and_value(rollouts["final_obs"], rollouts["final_global_obs"])
+            next_value = value_normalizer.denormalize(norm_next_value).flatten()
 
         advantages = torch.zeros_like(rewards)
         lastgaelam = 0
-
         num_steps = len(rewards)
+        
         for t in reversed(range(num_steps)):
-            if t == num_steps - 1:
-                nextnonterminal = 1.0 - dones[t]
-                nextvalues = next_value
-            else:
-                nextnonterminal = 1.0 - dones[t]
-                nextvalues = values[t + 1]
-
+            nextnonterminal = 1.0 - dones[t]
+            nextvalues = next_value if t == num_steps - 1 else values[t + 1]
             delta = rewards[t] + self.gamma * nextvalues * nextnonterminal - values[t]
             advantages[t] = lastgaelam = delta + self.gamma * self.gae_lambda * nextnonterminal * lastgaelam
 
         returns = advantages + values
         return advantages, returns
 
-    def train_step(self, rollouts):
+    def train_population(self, rollouts, brain, optimizer, value_normalizer):
         b_obs = rollouts["obs"]
         b_global_obs = rollouts["global_obs"]
         b_actions = rollouts["actions"]
         b_logprobs = rollouts["logprobs"]
         b_values = rollouts["values"]
-        
-        b_advantages, b_returns = self.compute_advantages(rollouts)
-        
         b_dones = rollouts["dones"]
-        num_steps, num_agents = b_dones.shape
         
-        # Create a valid_mask indicating if an agent is physically alive at step t.
-        # If an agent died at t-1 (dones[t-1] == True), the transition at t is a dead dummy frame.
+        b_advantages, b_returns = self.compute_advantages(rollouts, brain, value_normalizer)
+        
+        num_steps, num_agents = b_dones.shape
         valid_mask = torch.ones((num_steps, num_agents), dtype=torch.bool, device=self.device)
         valid_mask[1:] = ~b_dones[:-1].bool()
         
-        # Flatten all batches using the validity mask to discard padding
         mb_obs = b_obs[valid_mask]
         mb_global_obs = b_global_obs[valid_mask]
         mb_actions = b_actions[valid_mask]
         mb_logprobs = b_logprobs[valid_mask]
-        
         mb_advantages = b_advantages[valid_mask]
         mb_returns = b_returns[valid_mask]
         
-        # Calculate explained variance using unnormalized values and returns
+        # Explained variance
         y_pred = b_values[valid_mask].cpu().numpy()
         y_true = mb_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
         
-        # Update the value normalizer target statistics and generate normalized returns for training
-        self.value_normalizer.update(mb_returns)
-        mb_returns_norm = self.value_normalizer.normalize(mb_returns)
-        
-        # Normalize advantages based ONLY on valid active transitions
+        value_normalizer.update(mb_returns)
+        mb_returns_norm = value_normalizer.normalize(mb_returns)
         mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
         
         batch_size_total = mb_obs.shape[0]
         inds = np.arange(batch_size_total)
-        
-        # Check if we have enough data for batch size, otherwise lower it
         batch_size = min(self.batch_size, batch_size_total)
         
-        # Accumulate metrics across minibatches for logging
-        epoch_pg_losses = []
-        epoch_v_losses = []
-        epoch_entropies = []
+        epoch_pg_losses, epoch_v_losses, epoch_entropies = [], [], []
         
         for epoch in range(self.update_epochs):
             np.random.shuffle(inds)
@@ -247,7 +268,6 @@ class PPOTrainer:
                 end = start + batch_size
                 mb_inds = inds[start:end]
                 
-                # Fetch mini-batch data
                 mini_obs = mb_obs[mb_inds]
                 mini_global_obs = mb_global_obs[mb_inds]
                 mini_actions = mb_actions[mb_inds]
@@ -255,41 +275,45 @@ class PPOTrainer:
                 mini_returns_norm = mb_returns_norm[mb_inds]
                 mini_logprobs = mb_logprobs[mb_inds]
                 
-                _, newlogprob, entropy, newvalue = self.brain.get_action_and_value(mini_obs, mini_global_obs, mini_actions)
+                _, newlogprob, entropy, newvalue = brain.get_action_and_value(mini_obs, mini_global_obs, mini_actions)
                 logratio = newlogprob - mini_logprobs
                 ratio = logratio.exp()
                 
-                # Policy Loss
                 pg_loss1 = -mini_advantages * ratio
                 pg_loss2 = -mini_advantages * torch.clamp(ratio, 1 - self.clip_coef, 1 + self.clip_coef)
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
                 
-                # Value Loss: MSE against NORMALIZED returns
                 v_loss = 0.5 * ((newvalue.flatten() - mini_returns_norm) ** 2).mean()
                 
-                # Calculate approximate KL divergence for early stopping
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - logratio).mean()
                 approx_kl_divs.append(approx_kl.item())
 
                 entropy_loss = entropy.mean()
-                
                 loss = pg_loss - self.ent_coef * entropy_loss + v_loss * self.vf_coef
                 
-                self.optimizer.zero_grad(set_to_none=True)
+                optimizer.zero_grad(set_to_none=True)
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.brain.parameters(), self.max_grad_norm)
-                self.optimizer.step()
+                nn.utils.clip_grad_norm_(brain.parameters(), self.max_grad_norm)
+                optimizer.step()
                 
-                # Store minibatch metrics
                 epoch_pg_losses.append(pg_loss.item())
                 epoch_v_losses.append(v_loss.item())
                 epoch_entropies.append(entropy_loss.item())
                 
-            # Early stopping at epoch level
             if np.mean(approx_kl_divs) > self.target_kl:
-                print(f"Early stopping at epoch {epoch} due to reaching max KL.")
                 break
                 
-        # Return MEAN losses across all minibatches, not just the very last one
         return np.mean(epoch_pg_losses), np.mean(epoch_v_losses), np.mean(epoch_entropies), mb_returns.mean().item(), explained_var
+
+    def train_step(self, boid_rollouts, pred_rollouts):
+        """Asynchronous Co-Evolutionary Optimization Phase"""
+        
+        # 1. Update Prey
+        b_metrics = self.train_population(boid_rollouts, self.boid_brain, self.boid_optimizer, self.boid_value_norm)
+        
+        # 2. Update Predators independently
+        p_metrics = self.train_population(pred_rollouts, self.pred_brain, self.pred_optimizer, self.pred_value_norm)
+        
+        # Return merged metrics tuple (allows backwards-compatibility with logging script)
+        return {"boids": b_metrics, "preds": p_metrics}

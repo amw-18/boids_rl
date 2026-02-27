@@ -6,7 +6,7 @@ import matplotlib.animation as animation
 from mpl_toolkits.mplot3d import Axes3D
 
 from murmur_rl.envs.vector_env import VectorMurmurationEnv
-from murmur_rl.agents.starling import StarlingBrain
+from murmur_rl.agents.starling import StarlingBrain, FalconBrain
 
 class RLVision3D:
     def __init__(self, checkpoint_path, num_boids=400, num_predators=5, space_size=100.0, device='cpu'):
@@ -27,20 +27,21 @@ class RLVision3D:
         
         if checkpoint_path is not None:
             # Load checkpoint directly to find the expected Critic dimensions
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+            boid_checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
             
-            # Determine global_obs_dim dynamically so we don't crash when running simulation 
-            # with a different number of boids than training
-            if 'critic.0.weight' in checkpoint:
-                expected_global_obs_dim = checkpoint['critic.0.weight'].shape[1]
+            stacked_frames = 3  # Must match training config
+            if 'critic.0.weight' in boid_checkpoint:
+                # Critic is built as Linear(global_obs_dim * stacked_frames, ...) so divide back out
+                expected_global_obs_dim = boid_checkpoint['critic.0.weight'].shape[1] // stacked_frames
             else:
-                expected_global_obs_dim = self.env.global_obs_dim  # Fallback
+                expected_global_obs_dim = self.env.global_obs_dim
         else:
             expected_global_obs_dim = self.env.global_obs_dim
+            stacked_frames = 3
             
-        # Initialize RL Brain
-        self.stacked_frames = 3
-        self.brain = StarlingBrain(
+        # Initialize RL Brains
+        self.stacked_frames = stacked_frames
+        self.boid_brain = StarlingBrain(
             obs_dim=18, 
             global_obs_dim=expected_global_obs_dim, 
             action_dim=3, 
@@ -48,28 +49,47 @@ class RLVision3D:
             stacked_frames=self.stacked_frames
         ).to(self.device)
         
+        # Determine FalconBrain's global_obs_dim from its own checkpoint
+        pred_chkpt_path = checkpoint_path.replace("starling_brain", "falcon_brain") if checkpoint_path else None
+        if pred_chkpt_path and os.path.exists(pred_chkpt_path):
+            pred_checkpoint = torch.load(pred_chkpt_path, map_location=self.device, weights_only=True)
+            if 'critic.0.weight' in pred_checkpoint:
+                pred_global_obs_dim = pred_checkpoint['critic.0.weight'].shape[1] // stacked_frames
+            else:
+                pred_global_obs_dim = expected_global_obs_dim
+        else:
+            pred_checkpoint = None
+            pred_global_obs_dim = expected_global_obs_dim
+        
+        self.pred_brain = FalconBrain(
+            obs_dim=45,
+            global_obs_dim=pred_global_obs_dim,
+            action_dim=3,
+            hidden_size=128,
+            stacked_frames=self.stacked_frames
+        ).to(self.device)
+        
         if checkpoint_path is not None:
-            try:
-                self.brain.load_state_dict(checkpoint, strict=False)
-            except RuntimeError as e:
-                if "size mismatch" in str(e):
-                    print(f"\n[ERROR] Checkpoint Loading Failed: Size Mismatch")
-                    print(f"The checkpoint '{checkpoint_path}' appears to be trained on an older version of the environment.")
-                    print("The observation space has been upgraded from 16 to 18 dimensions (3D boundary relative positions).")
-                    print("Please train a new agent to use with the current environment.")
-                    import sys
-                    sys.exit(1)
-                else:
-                    raise e
+            self.boid_brain.load_state_dict(boid_checkpoint, strict=False)
+            
+            if pred_checkpoint is not None:
+                self.pred_brain.load_state_dict(pred_checkpoint, strict=False)
+                print(f"Loaded FalconBrain checkpoint: {pred_chkpt_path}")
+            else:
+                print(f"Warning: FalconBrain checkpoint not found. Predators will fly randomly.")
                 
-        self.brain.eval()
+        self.boid_brain.eval()
+        self.pred_brain.eval()
         
-        self.obs = self.env.reset()
-        global_obs = self.env.get_global_state(self.obs)
+        self.obs_boids, self.obs_preds = self.env.reset()
+        global_obs_boids = self.env.get_global_state(self.obs_boids)
+        global_obs_preds = self.env.get_global_state(self.obs_preds)
         
-        # Initialize temporal frame buffer for inference
-        self.rolling_obs = self.obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
-        self.rolling_global_obs = global_obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        # Initialize temporal frame buffers for inference
+        self.rolling_obs_boids = self.obs_boids.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        self.rolling_global_boids = global_obs_boids.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        self.rolling_obs_preds = self.obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        self.rolling_global_preds = global_obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
         
         # Matplotlib Setup
         self.fig = plt.figure(figsize=(10, 10))
@@ -77,9 +97,24 @@ class RLVision3D:
         self.ax.set_xlim([0, space_size])
         self.ax.set_ylim([0, space_size])
         self.ax.set_zlim([0, space_size])
-        self.ax.set_axis_off()  # Hide axes
-        self.fig.patch.set_facecolor('black')
-        self.ax.set_facecolor('black')
+        # Enable grid but keep dark theme aesthetics
+        self.fig.patch.set_facecolor('#1e1e1e')
+        self.ax.set_facecolor('#1e1e1e')
+        
+        # Style the grid lines and panes
+        self.ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
+        self.ax.xaxis.pane.set_facecolor('#1e1e1e')
+        self.ax.yaxis.pane.set_facecolor('#1e1e1e')
+        self.ax.zaxis.pane.set_facecolor('#1e1e1e')
+        self.ax.xaxis.pane.set_edgecolor('#444444')
+        self.ax.yaxis.pane.set_edgecolor('#444444')
+        self.ax.zaxis.pane.set_edgecolor('#444444')
+        
+        # Style the labels/ticks
+        self.ax.tick_params(colors='#888888')
+        self.ax.xaxis.label.set_color('#888888')
+        self.ax.yaxis.label.set_color('#888888')
+        self.ax.zaxis.label.set_color('#888888')
         
         # Initialize Boid scatter
         positions = self.env.physics.positions.cpu().numpy()
@@ -98,25 +133,32 @@ class RLVision3D:
     def update(self, frame):
         # Shift temporal frame buffers left and insert new observed frame at the end
         if frame > 0:
-            global_obs = self.env.get_global_state(self.obs)
-            self.rolling_obs = torch.cat([self.rolling_obs[:, 1:, :], self.obs.unsqueeze(1)], dim=1)
-            self.rolling_global_obs = torch.cat([self.rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
+            global_obs_boids = self.env.get_global_state(self.obs_boids)
+            global_obs_preds = self.env.get_global_state(self.obs_preds)
+            self.rolling_obs_boids = torch.cat([self.rolling_obs_boids[:, 1:, :], self.obs_boids.unsqueeze(1)], dim=1)
+            self.rolling_global_boids = torch.cat([self.rolling_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
+            self.rolling_obs_preds = torch.cat([self.rolling_obs_preds[:, 1:, :], self.obs_preds.unsqueeze(1)], dim=1)
+            self.rolling_global_preds = torch.cat([self.rolling_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
             
         with torch.no_grad():
             N = self.env.n_agents
-            flat_obs = self.rolling_obs.view(N, -1)
-            features = self.brain.actor_feature_extractor(flat_obs)
-            action_mean = self.brain.actor_mean(features)
-            # Use deterministic actions for visualization
-            action_batch = action_mean 
+            P = self.env.num_predators
+            
+            flat_obs_boids = self.rolling_obs_boids.view(N, -1)
+            features_boids = self.boid_brain.actor_feature_extractor(flat_obs_boids)
+            action_batch = self.boid_brain.actor_mean(features_boids)
+            
+            flat_obs_preds = self.rolling_obs_preds.view(P, -1)
+            features_preds = self.pred_brain.actor_feature_extractor(flat_obs_preds)
+            pred_action_batch = self.pred_brain.actor_mean(features_preds)
             
         # Step Vector Env directly with Tensor
-        self.obs, rewards, dones = self.env.step(action_batch)
+        self.obs_boids, self.obs_preds, rewards, pred_rewards, dones = self.env.step(action_batch, predator_actions=pred_action_batch)
         
         # Flush temporal history for agents that died this frame
         if dones.any():
             dead_mask = dones.bool()
-            self.rolling_obs[dead_mask] = self.obs[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
+            self.rolling_obs_boids[dead_mask] = self.obs_boids[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
         
         # Update Boid scatter plot data (only alive)
         alive = self.env.physics.alive_mask.cpu().numpy()

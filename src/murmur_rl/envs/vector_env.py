@@ -110,28 +110,32 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.physics.reset()
         self._dead_mask.zero_()
-        _, _, self.last_potential = self._get_rewards()
-        return self._get_observations()
+        _, _, _, self.last_potential = self._get_rewards()
+        return self._get_observations(), self._get_predator_observations()
 
-    def step(self, actions: torch.Tensor):
+    def step(self, boid_actions: torch.Tensor, predator_actions: torch.Tensor = None):
         """
         Args:
-            actions: (N, 3) tensor of normalized actions in [-1, 1]
+            boid_actions: (N, 3) tensor
+            predator_actions: (P, 3) tensor
         Returns:
-            obs:   (N, 16) tensor
-            rewards: (N,) tensor
+            obs_boids:   (N, 18) tensor
+            obs_preds:   (P, 45) tensor
+            rewards_boids: (N,) tensor
+            rewards_preds: (P,) tensor
             dones: (N,) bool tensor  (True = terminated or truncated)
         """
         # Step physics using Thrust, Roll, Pitch actions [-1, 1]
-        self.physics.step(actions=actions)
+        self.physics.step(boid_actions=boid_actions, predator_actions=predator_actions)
         self.num_moves += 1
 
-        obs = self._get_observations()
-        rewards, new_deaths, new_potential = self._get_rewards()
+        obs_boids = self._get_observations()
+        obs_preds = self._get_predator_observations()
+        rewards_boids, rewards_preds, new_deaths, new_potential = self._get_rewards()
 
-        # PBRS shaping
+        # PBRS shaping for Boids
         shaping = (self._gamma * new_potential) - self.last_potential
-        rewards += shaping
+        rewards_boids += shaping
         self.last_potential = new_potential.clone()
 
         # Update persistent death mask
@@ -144,7 +148,7 @@ class VectorMurmurationEnv:
         else:
             dones = self._dead_mask.clone()
 
-        return obs, rewards, dones
+        return obs_boids, obs_preds, rewards_boids, rewards_preds, dones
 
     # ------------------------------------------------------------------
     # Vectorized observations — zero Python loops
@@ -212,7 +216,7 @@ class VectorMurmurationEnv:
         u = dx / d.clamp(min=1e-5)                              # (N, 3) unit dir
 
         # Closing speed
-        max_v_close = self.physics.predator_speed + self.physics.base_speed
+        max_v_close = self.physics.predator_sprint_speed + self.physics.base_speed
         v_close = -(dv * u).sum(dim=-1, keepdim=True)           # (N, 1)
         v_close_norm = (v_close / max_v_close).clamp(-1.0, 1.0)
 
@@ -252,6 +256,74 @@ class VectorMurmurationEnv:
         ], dim=1)
 
         return obs
+
+    def _get_predator_observations(self):
+        """
+        Build local observation vectors for the RL Predators.
+        Features: (Own Kinematics) + (Mean Field CoM) + (5 Closest Starlings w/ Visual Obfuscation)
+        """
+        pred_pos = self.physics.predator_position # (P, 3)
+        pred_vel = self.physics.predator_velocity # (P, 3)
+        boid_pos = self.physics.positions # (N, 3)
+        alive = self.physics.alive_mask # (N,)
+
+        # Own Kinematics
+        pos_relative = (pred_pos - self._half_space) / self._half_space # (P, 3)
+        vel_norm = pred_vel / self.physics.predator_sprint_speed # (P, 3)
+        stamina_norm = (self.physics.predator_stamina / self.physics.predator_max_stamina).unsqueeze(1) # (P, 1)
+
+        # Center of Mass of Alive Swarm
+        alive_f = alive.float().unsqueeze(1)
+        num_alive = alive_f.sum().clamp(min=1.0)
+        com = (boid_pos * alive_f).sum(dim=0) / num_alive # (3,)
+        com_relative = (com - pred_pos) / self._half_space # (P, 3)
+
+        # Visual Obfuscation: Find 5 closest alive targets
+        dist_matrix = torch.cdist(pred_pos, boid_pos) # (P, N)
+        # Mask out dead boids
+        dist_matrix = torch.where(alive.unsqueeze(0), dist_matrix, self._inf)
+
+        k = min(5, self.n_agents)
+        closest_dists, closest_idx = torch.topk(dist_matrix, k=k, dim=1, largest=False) # (P, k)
+
+        target_obs = []
+        for i in range(k):
+            target_ids = closest_idx[:, i] # (P,)
+            dists = closest_dists[:, i:i+1] # (P, 1)
+
+            # If the closest target is dead (happens if < k alive), zero out its obs
+            is_valid = (dists < self._inf).float()
+
+            target_positions = boid_pos[target_ids] # (P, 3)
+            target_velocities = self.physics.velocities[target_ids] # (P, 3)
+
+            # --- CALCULATE VISUAL OBFUSCATION NOISE ---
+            # We need the local density of each of these k targets
+            # To do this safely/fast, we grab their row from the boid-boid distance matrix
+            b_b_dist = torch.cdist(target_positions, boid_pos) # (P, N)
+            b_b_dist = torch.where(alive.unsqueeze(0), b_b_dist, self._inf)
+            target_density = (b_b_dist < self.perception_radius).float().sum(dim=1, keepdim=True) / self.n_agents # (P, 1)
+
+            # Gaussian Noise explicitly scales with density.
+            # Tuning param: a density of 1.0 (everyone) causes max_noise variance
+            max_noise_variance = 5.0 # units of spatial distortion
+            sigma = target_density * max_noise_variance
+            noise = torch.randn_like(target_positions) * sigma
+
+            obfuscated_target_pos = target_positions + noise
+            rel_pos = (obfuscated_target_pos - pred_pos) / self._half_space # (P, 3)
+            rel_vel = (target_velocities - pred_vel) / (self.physics.predator_sprint_speed + self.physics.base_speed) # (P, 3)
+
+            target_obs.append(rel_pos * is_valid)
+            target_obs.append(rel_vel * is_valid)
+            target_obs.append((dists / (self.space_size * 1.5)) * is_valid) # (P, 1) Normalized distance
+
+        # Concat all elements
+        target_obs_tensor = torch.cat(target_obs, dim=1) if len(target_obs) > 0 else torch.zeros((self.num_predators, 0), device=self.device)
+
+        # Total Predator Obs: (P, 3(pos) + 3(vel) + 1(stam) + 3(com) + 5*(3+3+1)) = (P, 45)
+        obs = torch.cat([pos_relative, vel_norm, stamina_norm, com_relative, target_obs_tensor], dim=1)
+        return obs
         
     def get_global_state(self, local_obs):
         """
@@ -272,16 +344,17 @@ class VectorMurmurationEnv:
         
         # 2. Flatten Predator State
         pred_pos = self.physics.predator_position.flatten() / self.space_size
-        pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_speed
+        pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_sprint_speed
         
         # 3. Concatenate Mean Field
         mean_field_state = torch.cat([mean_pos, mean_vel, mean_up, pred_pos, pred_vel, alive_ratio], dim=0) # (10 + P*6,)
         
-        # 4. Expand Mean Field to match batch size N
-        expanded_mean_field = mean_field_state.unsqueeze(0).expand(self.n_agents, -1) # (N, 10 + P*6)
+        # 4. Expand Mean Field to match batch size N or P
+        batch_size = local_obs.shape[0]
+        expanded_mean_field = mean_field_state.unsqueeze(0).expand(batch_size, -1)
         
         # 5. Concatenate with Focal Local Observations
-        global_state = torch.cat([local_obs, expanded_mean_field], dim=1) # (N, obs_dim + mean_field_dim)
+        global_state = torch.cat([local_obs, expanded_mean_field], dim=1)
         
         return global_state
 
@@ -346,4 +419,8 @@ class VectorMurmurationEnv:
         # Terminal states must have 0 potential
         new_potential = torch.where(self._dead_mask | new_deaths, self._zero, new_potential)
 
-        return rewards, new_deaths, new_potential
+        # Predator Rewards
+        rewards_preds = torch.zeros(self.num_predators, device=self.device)
+        # TODO: Add capture rewards here. For now, baseline 0 to allow script to run.
+
+        return rewards, rewards_preds, new_deaths, new_potential

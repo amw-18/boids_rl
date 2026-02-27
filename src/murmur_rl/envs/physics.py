@@ -33,22 +33,21 @@ class BoidsPhysics:
         # Rule weights (Soft boundary only, no hardcoded flocking)
         self.boundary_weight = boundary_weight
         
-        # Predator features
-        self.predator_speed = base_speed * 1.5 
+        # Predator properties
+        self.predator_base_speed = base_speed
+        self.predator_sprint_speed = base_speed * 1.5 
         self.predator_turn_angle = max_turn_angle * 1.5
         self.predator_catch_radius = 2.0
         
-        # Falcon State Machine Parameters
-        self.min_flock_size = 5
-        self.predator_vantage_z = space_size * 0.9
-        self.predator_reset_duration = 50 # Timesteps to stay in VANTAGE
-        self.predator_loiter_base = 100 # Base LOITER duration
-        self.predator_loiter_variance = 300 # High variance added to base
+        # Co-Evolution Parameters: Stamina Economy
+        self.predator_max_stamina = 100.0 # Frames of total sprint capacity
+        self.predator_sprint_drain = 1.0  # Stamina lost per frame while sprinting
+        self.predator_recovery_rate = 0.5 # Stamina recovered per frame while cruising
         
-        # Vectorized Predator States: 0=VANTAGE, 1=HUNTING, 2=DIVING, 3=LOITER
-        self.predator_state = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
-        self.predator_timer = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
-        self.predator_target_pos = torch.zeros((self.num_predators, 3), device=self.device)
+        # Track individual predator energy
+        self.predator_stamina = torch.full((self.num_predators,), self.predator_max_stamina, device=self.device)
+        self.predator_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
+        self.predator_cooldown_duration = 50 # Frames disabled after a successful catch
 
 
         self.reset()
@@ -90,29 +89,39 @@ class BoidsPhysics:
         
         pred_vel = (torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * 2 - 1)
         speeds_pred = torch.norm(pred_vel, dim=-1, keepdim=True).clamp(min=1e-5)
-        self.predator_velocity = (pred_vel / speeds_pred) * self.predator_speed
+        self.predator_velocity = (pred_vel / speeds_pred) * self.predator_base_speed
         
-        # Reset State Machine
-        self.predator_state.zero_() # VANTAGE
-        self.predator_timer.fill_(self.predator_reset_duration)
-        self.predator_target_pos.zero_()
+        # Initialize predator up vectors for 6-DOF tracking
+        pred_z_axis = torch.zeros_like(self.predator_velocity)
+        pred_z_axis[:, 2] = 1.0
+        pred_z_axis = torch.where(torch.abs(self.predator_velocity[:, 2:3] / self.predator_base_speed) > 0.99, torch.tensor([0.0, 1.0, 0.0], device=self.device), pred_z_axis)
+        
+        pred_right = torch.cross(self.predator_velocity / self.predator_base_speed, pred_z_axis, dim=-1)
+        pred_right = pred_right / torch.norm(pred_right, dim=-1, keepdim=True).clamp(min=1e-5)
+        self.predator_up_vectors = torch.cross(pred_right, self.predator_velocity / self.predator_base_speed, dim=-1)
+        self.predator_up_vectors = self.predator_up_vectors / torch.norm(self.predator_up_vectors, dim=-1, keepdim=True).clamp(min=1e-5)
+        
+        # Reset Co-Evolution state
+        self.predator_stamina.fill_(self.predator_max_stamina)
+        self.predator_cooldown.zero_()
 
         # Boids that have been eaten (boolean mask, True = alive, False = dead)
         self.alive_mask = torch.ones(self.num_boids, dtype=torch.bool, device=self.device)
         
-    def step(self, actions: torch.Tensor = None):
+    def step(self, boid_actions: torch.Tensor = None, predator_actions: torch.Tensor = None):
         """
         Advance the physics by one timestep.
         
         Args:
-            actions: Tensor of shape (num_boids, 3) representing (Thrust, Roll Rate, Pitch Rate) in [-1, 1].
+            boid_actions: Tensor of shape (num_boids, 3) representing (Thrust, Roll Rate, Pitch Rate) in [-1, 1].
+            predator_actions: Tensor of shape (num_predators, 3) representing (Sprint, Roll Rate, Pitch Rate) in [-1, 1].
         """
-        if actions is None:
-            actions = torch.zeros((self.num_boids, 3), device=self.device)
+        if boid_actions is None:
+            boid_actions = torch.zeros((self.num_boids, 3), device=self.device)
             
-        thrust_action = actions[:, 0:1] # [-1, 1]
-        roll_action = actions[:, 1:2]   # [-1, 1]
-        pitch_action = actions[:, 2:3]  # [-1, 1]
+        thrust_action = boid_actions[:, 0:1] # [-1, 1]
+        roll_action = boid_actions[:, 1:2]   # [-1, 1]
+        pitch_action = boid_actions[:, 2:3]  # [-1, 1]
         
         # Apply scaling based on physics limits
         thrust = thrust_action * self.max_force
@@ -165,155 +174,79 @@ class BoidsPhysics:
         self.positions += self.velocities * self.dt
         
         # === PREDATOR PHYSICS ===
-        self._update_predator()
+        self._update_predator(predator_actions)
         self._check_captures()
         
-    def _update_predator(self):
-        """Update predator velocity and position via the Falcon State Machine."""
-        if not self.alive_mask.any():
-            return # Everyone is dead
-            
-        alive_positions = self.positions[self.alive_mask]
-        
-        # Vectorized State Evaluation
-        is_vantage = self.predator_state == 0
-        
-        # 1. Height-based Vantage Check:
-        # A predator is "climbing" if it is in VANTAGE state and its Z-position is below the vantage height.
-        climbing_mask = is_vantage & (self.predator_position[:, 2] < self.predator_vantage_z - 5.0)
-        
-        if climbing_mask.any():
-            num_climbing = climbing_mask.sum()
-            # Spread predators out slightly around the center
-            spread = self.space_size * 0.1
-            x_offsets = (torch.rand(num_climbing, device=self.device) * 2 - 1) * spread
-            y_offsets = (torch.rand(num_climbing, device=self.device) * 2 - 1) * spread
-            
-            self.predator_target_pos[climbing_mask, 0] = (self.space_size / 2.0) + x_offsets
-            self.predator_target_pos[climbing_mask, 1] = (self.space_size / 2.0) + y_offsets
-            self.predator_target_pos[climbing_mask, 2] = self.predator_vantage_z
-            
-        # A predator has reached the vantage point when its Z-position is high enough
-        reached_vantage_mask = is_vantage & (self.predator_position[:, 2] >= self.predator_vantage_z - 5.0)
-        
-        # We also enforce the minimum wait time here so they don't strike immediately upon reaching the height
-        self.predator_timer = torch.where(reached_vantage_mask & (self.predator_timer > 0), self.predator_timer - 1, self.predator_timer)
-        
-        expired_vantage_mask = reached_vantage_mask & (self.predator_timer <= 0)
-        
-        # Transition from VANTAGE to LOITER
-        if expired_vantage_mask.any():
-            self.predator_state[expired_vantage_mask] = 3 # LOITER
-            num_loitering_new = expired_vantage_mask.sum()
-            # High variance distribution for LOITER duration
-            random_duration = self.predator_loiter_base + torch.randint(0, self.predator_loiter_variance, (num_loitering_new,), device=self.device)
-            self.predator_timer[expired_vantage_mask] = random_duration
-            
-        # 2. State Evaluation (LOITER)
-        is_loitering = self.predator_state == 3
-        if is_loitering.any():
-            self.predator_timer[is_loitering] -= 1
-            
-            # While loitering, randomly wander above vantage height
-            # We pick a new random nearby target periodically
-            needs_new_target = is_loitering & (torch.rand(self.num_predators, device=self.device) < 0.05)
-            if needs_new_target.any():
-                num_new_targets = needs_new_target.sum()
-                spread = self.space_size * 0.2
-                x_offsets = (torch.rand(num_new_targets, device=self.device) * 2 - 1) * spread
-                y_offsets = (torch.rand(num_new_targets, device=self.device) * 2 - 1) * spread
-                z_offsets = torch.rand(num_new_targets, device=self.device) * (self.space_size - self.predator_vantage_z)
-                
-                self.predator_target_pos[needs_new_target, 0] = (self.space_size / 2.0) + x_offsets
-                self.predator_target_pos[needs_new_target, 1] = (self.space_size / 2.0) + y_offsets
-                self.predator_target_pos[needs_new_target, 2] = self.predator_vantage_z + z_offsets
+    def _update_predator(self, actions: torch.Tensor = None):
+        """Update predator velocity and position via continuous RL controls with stamina."""
+        if actions is None:
+            actions = torch.zeros((self.num_predators, 3), device=self.device)
 
-        expired_loiter_mask = is_loitering & (self.predator_timer <= 0)
+        sprint_action = actions[:, 0:1] # [-1, 1], >0 is sprinting
+        roll_action = actions[:, 1:2]   # [-1, 1]
+        pitch_action = actions[:, 2:3]  # [-1, 1]
         
-        # Evaluate Hunting vs Diving for predators ready to strike or already striking
-        # They can only enter these states if they have finished waiting at the vantage point.
-        eval_mask = expired_loiter_mask | (self.predator_state == 1) | (self.predator_state == 2)
-        if eval_mask.any():
-            dist_matrix = torch.cdist(alive_positions, alive_positions)
-            neighbors = (dist_matrix < self.perception_radius).sum(dim=1) - 1
-            isolated_mask = neighbors < self.min_flock_size
-            has_isolated = isolated_mask.any()
-            
-            # Specifically for newly expired loiterers, choose their next state
-            if expired_loiter_mask.any():
-                self.predator_state[expired_loiter_mask] = 1 if has_isolated else 2
-
-        # Process HUNTING
-        is_hunting = self.predator_state == 1
-        if is_hunting.any():
-            isolated_positions = alive_positions[isolated_mask]
-            hunting_preds = self.predator_position[is_hunting]
-            dist_to_isolated = torch.cdist(hunting_preds, isolated_positions)
-            closest_idx = torch.argmin(dist_to_isolated, dim=1)
-            self.predator_target_pos[is_hunting] = isolated_positions[closest_idx]
-            
-        # Process DIVING
-        is_diving = self.predator_state == 2
-        if is_diving.any():
-            diving_preds = self.predator_position[is_diving]
-            dist_to_all = torch.cdist(diving_preds, alive_positions)
-            nearest_overall_idx = torch.argmin(dist_to_all, dim=1)
-            
-            for i, idx in enumerate(torch.where(is_diving)[0]):
-                nearest_boid_pos = alive_positions[nearest_overall_idx[i]:nearest_overall_idx[i]+1]
-                flock_distances = torch.cdist(nearest_boid_pos, alive_positions).squeeze(0)
-                local_flock_mask = flock_distances < self.perception_radius
-                local_flock_positions = alive_positions[local_flock_mask]
-                self.predator_target_pos[idx] = local_flock_positions.mean(dim=0)
-                
-            # Check Dive Completion
-            target_zs = self.predator_target_pos[is_diving, 2]
-            pred_zs = self.predator_position[is_diving, 2]
-            pred_vz = self.predator_velocity[is_diving, 2]
-            
-            completed_dives = (pred_zs < target_zs + 5.0) & (pred_vz < 0)
-            if completed_dives.any():
-                diving_indices = torch.where(is_diving)[0]
-                completed_indices = diving_indices[completed_dives]
-                self.predator_state[completed_indices] = 0 # VANTAGE
-                self.predator_timer[completed_indices] = self.predator_reset_duration
-
-        # 2. Seek Behavior (Steering within cone constraint)
-        desired_velocity = self.predator_target_pos - self.predator_position
-        dist_to_target = torch.norm(desired_velocity, dim=-1, keepdim=True).clamp(min=1e-5)
-        desired_heading = desired_velocity / dist_to_target
+        roll_angle = roll_action * self.predator_turn_angle
+        pitch_angle = pitch_action * self.predator_turn_angle
         
-        current_speed = torch.norm(self.predator_velocity, dim=-1, keepdim=True).clamp(min=1e-5)
-        current_heading = self.predator_velocity / current_speed
+        # 1. Orientation Update (Identical to Boids)
+        speed = torch.norm(self.predator_velocity, dim=-1, keepdim=True).clamp(min=1e-5)
+        forward = self.predator_velocity / speed
+        up = self.predator_up_vectors
+        right = torch.cross(forward, up, dim=-1)
+        right = right / torch.norm(right, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        dot = (current_heading * desired_heading).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
-        angle = torch.acos(dot)
+        cos_r = torch.cos(roll_angle)
+        sin_r = torch.sin(roll_angle)
+        up_rolled = up * cos_r + right * sin_r
         
-        w = desired_heading - dot * current_heading
-        w_norm = torch.norm(w, dim=-1, keepdim=True).clamp(min=1e-5)
-        w_unit = w / w_norm
+        cos_p = torch.cos(pitch_angle)
+        sin_p = torch.sin(pitch_angle)
+        forward_new = forward * cos_p + up_rolled * sin_p
+        up_new = up_rolled * cos_p - forward * sin_p
         
-        turn_angle = torch.clamp(angle, max=self.predator_turn_angle)
+        forward_new = forward_new / torch.norm(forward_new, dim=-1, keepdim=True).clamp(min=1e-5)
+        up_new = up_new / torch.norm(up_new, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        final_heading = torch.cos(turn_angle) * current_heading + torch.sin(turn_angle) * w_unit
-        final_heading = torch.where(angle < 1e-4, desired_heading, final_heading)
-        final_heading = final_heading / torch.norm(final_heading, dim=-1, keepdim=True).clamp(min=1e-5)
+        right_new = torch.cross(forward_new, up_new, dim=-1)
+        right_new = right_new / torch.norm(right_new, dim=-1, keepdim=True).clamp(min=1e-5)
+        self.predator_up_vectors = torch.cross(right_new, forward_new, dim=-1)
+        self.predator_up_vectors = self.predator_up_vectors / torch.norm(self.predator_up_vectors, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        # 3. Apply physics at fixed predator speed, except slower during LOITER
-        is_loitering_mask = (self.predator_state == 3).unsqueeze(-1)
-        current_target_speed = torch.where(is_loitering_mask, self.predator_speed * 0.3, self.predator_speed)
+        # 2. Stamina Management & Speed Calculation
+        # Decrement cooldown timers
+        self.predator_cooldown = torch.clamp(self.predator_cooldown - 1, min=0)
+        is_cooldown = self.predator_cooldown > 0
         
-        self.predator_velocity = final_heading * current_target_speed
+        # Intent to sprint requires stamina > 0 and no cooldown
+        is_sprinting = (sprint_action.squeeze(-1) > 0) & (self.predator_stamina > 0) & ~is_cooldown
+        is_cruising = ~is_sprinting
+        
+        # Update stamina
+        self.predator_stamina = torch.where(
+            is_sprinting,
+            self.predator_stamina - self.predator_sprint_drain,
+            self.predator_stamina + self.predator_recovery_rate
+        ).clamp(min=0.0, max=self.predator_max_stamina)
+        
+        # Assign speed based on state
+        target_speed = torch.full((self.num_predators, 1), self.predator_base_speed, device=self.device)
+        target_speed[is_sprinting] = self.predator_sprint_speed
+        # During cooldown after a catch, they are slow
+        target_speed[is_cooldown] = self.predator_base_speed * 0.5
+        
+        # Inertia blending for smooth speed transitions
+        new_speed = speed * 0.9 + target_speed * 0.1
+        
+        self.predator_velocity = forward_new * new_speed
         self.predator_position += self.predator_velocity * self.dt
         
     def _check_captures(self):
-        """Mark boids as dead if ANY predator touches them."""
+        """Mark boids as dead if ANY predator touches them. Apply cooldowns."""
         if not self.alive_mask.any():
             return
             
         # Distance from ALL predators to ALL boids
-        # positions: (N_boids, 3), predator_position: (num_predators, 3)
-        # Using cdist -> (num_predators, N_boids)
         dist_to_predator = torch.cdist(self.predator_position, self.positions)
         
         # Boids are caught if distance < catch_radius for ANY predator
@@ -323,22 +256,10 @@ class BoidsPhysics:
         # Update alive mask
         self.alive_mask &= ~caught
         
-        # If any boids were caught by a specific predator, reset that predator to VANTAGE
-        # dist_to_predator is (num_predators, N_boids)
-        # caught_matrix is (num_predators, N_boids)
-        # We need to know WHICH predator made a catch:
+        # WHICH predators made a catch?
         caught_by_predator = caught_matrix.any(dim=1) # (num_predators,)
         
         if caught_by_predator.any():
-            self.predator_state[caught_by_predator] = 0 # VANTAGE
-            self.predator_timer[caught_by_predator] = self.predator_reset_duration # Resets the wait timer at the top
-            
-            num_caught = caught_by_predator.sum()
-            spread = self.space_size * 0.1
-            x_offsets = (torch.rand(num_caught, device=self.device) * 2 - 1) * spread
-            y_offsets = (torch.rand(num_caught, device=self.device) * 2 - 1) * spread
-            
-            # The predator immediately targets the center/top to climb back up (with some spread)
-            self.predator_target_pos[caught_by_predator, 0] = (self.space_size / 2.0) + x_offsets
-            self.predator_target_pos[caught_by_predator, 1] = (self.space_size / 2.0) + y_offsets
-            self.predator_target_pos[caught_by_predator, 2] = self.predator_vantage_z
+            # Apply cooldown to successful predators, freezing their ability to sprint
+            # and slowing them down for the duration.
+            self.predator_cooldown[caught_by_predator] = self.predator_cooldown_duration
