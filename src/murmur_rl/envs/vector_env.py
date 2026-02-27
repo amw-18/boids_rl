@@ -70,6 +70,7 @@ class VectorMurmurationEnv:
         self._pbrs_k = torch.tensor(pbrs_k, device=self.device)
         self._pbrs_c = torch.tensor(pbrs_c, device=self.device)
         self.last_potential = torch.zeros(num_agents, device=self.device)
+        self.last_pred_potential = torch.zeros(num_predators, device=self.device)
 
         # Diagonal mask for cdist — avoids in-place fill_diagonal_ which breaks torch.compile
         self._diag_mask = torch.eye(num_agents, dtype=torch.bool, device=self.device)
@@ -110,7 +111,9 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.physics.reset()
         self._dead_mask.zero_()
-        _, _, _, self.last_potential = self._get_rewards()
+        _, _, _, new_potential, new_pred_potential = self._get_rewards()
+        self.last_potential = new_potential
+        self.last_pred_potential = new_pred_potential
         return self._get_observations(), self._get_predator_observations()
 
     def step(self, boid_actions: torch.Tensor, predator_actions: torch.Tensor = None):
@@ -131,12 +134,17 @@ class VectorMurmurationEnv:
 
         obs_boids = self._get_observations()
         obs_preds = self._get_predator_observations()
-        rewards_boids, rewards_preds, new_deaths, new_potential = self._get_rewards()
+        rewards_boids, rewards_preds, new_deaths, new_potential, new_pred_potential = self._get_rewards()
 
         # PBRS shaping for Boids
         shaping = (self._gamma * new_potential) - self.last_potential
         rewards_boids += shaping
         self.last_potential = new_potential.clone()
+
+        # PBRS shaping for Predators
+        pred_shaping = (self._gamma * new_pred_potential) - self.last_pred_potential
+        rewards_preds += pred_shaping
+        self.last_pred_potential = new_pred_potential.clone()
 
         # Update persistent death mask
         self._dead_mask |= new_deaths
@@ -419,8 +427,12 @@ class VectorMurmurationEnv:
         # Terminal states must have 0 potential
         new_potential = torch.where(self._dead_mask | new_deaths, self._zero, new_potential)
 
-        # Predator Rewards
-        rewards_preds = torch.zeros(self.num_predators, device=self.device)
-        # TODO: Add capture rewards here. For now, baseline 0 to allow script to run.
+        # Predator Rewards with PBRS boundary potential
+        pred_pos = self.physics.predator_position  # (P, 3)
+        pred_pos_relative = (pred_pos - self._half_space) / self._half_space
+        pred_d_center_sq = (pred_pos_relative**2).sum(dim=-1)  # (P,)
+        pred_phi_bounds = -self._pbrs_k * pred_d_center_sq  # (P,)
 
-        return rewards, rewards_preds, new_deaths, new_potential
+        rewards_preds = torch.zeros(self.num_predators, device=self.device)
+
+        return rewards, rewards_preds, new_deaths, new_potential, pred_phi_bounds
