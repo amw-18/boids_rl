@@ -39,11 +39,13 @@ class RLVision3D:
             expected_global_obs_dim = self.env.global_obs_dim
             
         # Initialize RL Brain
+        self.stacked_frames = 3
         self.brain = StarlingBrain(
             obs_dim=18, 
             global_obs_dim=expected_global_obs_dim, 
             action_dim=3, 
-            hidden_size=64
+            hidden_size=64,
+            stacked_frames=self.stacked_frames
         ).to(self.device)
         
         if checkpoint_path is not None:
@@ -63,6 +65,11 @@ class RLVision3D:
         self.brain.eval()
         
         self.obs = self.env.reset()
+        global_obs = self.env.get_global_state()
+        
+        # Initialize temporal frame buffer for inference
+        self.rolling_obs = self.obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        self.rolling_global_obs = global_obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
         
         # Matplotlib Setup
         self.fig = plt.figure(figsize=(10, 10))
@@ -89,14 +96,27 @@ class RLVision3D:
         )
         
     def update(self, frame):
+        # Shift temporal frame buffers left and insert new observed frame at the end
+        if frame > 0:
+            global_obs = self.env.get_global_state()
+            self.rolling_obs = torch.cat([self.rolling_obs[:, 1:, :], self.obs.unsqueeze(1)], dim=1)
+            self.rolling_global_obs = torch.cat([self.rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
+            
         with torch.no_grad():
-            features = self.brain.actor_feature_extractor(self.obs)
+            N = self.env.n_agents
+            flat_obs = self.rolling_obs.view(N, -1)
+            features = self.brain.actor_feature_extractor(flat_obs)
             action_mean = self.brain.actor_mean(features)
             # Use deterministic actions for visualization
             action_batch = action_mean 
             
         # Step Vector Env directly with Tensor
         self.obs, rewards, dones = self.env.step(action_batch)
+        
+        # Flush temporal history for agents that died this frame
+        if dones.any():
+            dead_mask = dones.bool()
+            self.rolling_obs[dead_mask] = self.obs[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
         
         # Update Boid scatter plot data (only alive)
         alive = self.env.physics.alive_mask.cpu().numpy()

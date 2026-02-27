@@ -74,6 +74,11 @@ To make decisions, each starling $i$ processes a strictly localized 18-dimension
     *   *Looming (Time-to-Collision Proxy):* The rate of optical expansion of the predator on the retina, mathematically formulated as $\text{loom} = v_{close} / \max(d, \epsilon)$. It is strictly clamped to prevent numerical explosions when $d \to 0$.
     *   *Bearing (In Front?):* The dot product of the boid's heading and the predator's bearing, $\hat{v}_i \cdot \vec{u}$.
 
+### Addressing the POMDP: Temporal Context via Frame Stacking
+A strictly instantaneous 18D observation vector inherently strips away all spatial history, inadvertently creating a Partially Observable Markov Decision Process (POMDP). Without historical context, the agent cannot intrinsically perceive the *derivatives* of motion—namely the predator's acceleration and shifting execution (jerk). To differentiate between a predator actively accelerating into a dive versus one bleeding off residual speed from an aborted maneuver, we integrated **Frame Stacking** ($k=3$).
+
+By providing the network with a sliding geometric window of the most recent observation vectors, the feedforward Multi-Layer Perceptron (MLP) within the MAPPO architecture can natively compute finite-difference approximations of acceleration and optical flow, dodging the computational and memory burdens introduced by recurrent topologies (LSTM/GRU).
+
 ### Reward Function: Potential-Based Reward Shaping (PBRS)
 The core philosophy of our approach is that **flocking is not explicitly rewarded**. However, initial experiments revealed a pathological "fear of the edge" where massive terminal penalties for boundary violations paralyzed exploration. To mathematically eliminate this without corrupting the optimal survival policy, we utilize **Potential-Based Reward Shaping (PBRS)**.
 

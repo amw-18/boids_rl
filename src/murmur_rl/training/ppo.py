@@ -56,7 +56,8 @@ class PPOTrainer:
         max_grad_norm: float = 0.5,
         target_kl: float = 0.015,
         update_epochs: int = 4,
-        batch_size: int = 64
+        batch_size: int = 64,
+        stacked_frames: int = 3
     ):
         self.env = env
         self.brain = brain.to(device)
@@ -80,18 +81,25 @@ class PPOTrainer:
         self.target_kl = target_kl
         self.update_epochs = update_epochs
         self.batch_size = batch_size
+        self.stacked_frames = stacked_frames
 
     def collect_rollouts(self, num_steps=200):
         """
         Run the environment for `num_steps`, collecting (obs, actions,
         log_probs, rewards, values) as on-device tensors — no dicts, no numpy.
         """
-        obs = self.env.reset()                      # (N, 16) tensor on device
+        obs = self.env.reset()                      # (N, obs_dim) tensor on device
+        global_obs = self.env.get_global_state()
+
+        N = self.env.n_agents
+        
+        # Initialize rolling frame buffers for POMDP resolution
+        rolling_obs = obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        rolling_global_obs = global_obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
 
         # Pre-allocate buffers
-        N = self.env.n_agents
-        b_obs      = torch.empty((num_steps, N, self.env.obs_dim), device=self.device)
-        b_global_obs = torch.empty((num_steps, N, self.env.global_obs_dim), device=self.device)
+        b_obs      = torch.empty((num_steps, N, self.stacked_frames * self.env.obs_dim), device=self.device)
+        b_global_obs = torch.empty((num_steps, N, self.stacked_frames * self.env.global_obs_dim), device=self.device)
         b_actions  = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
         b_logprobs = torch.empty((num_steps, N), device=self.device)
         b_rewards  = torch.empty((num_steps, N), device=self.device)
@@ -99,13 +107,20 @@ class PPOTrainer:
         b_values   = torch.empty((num_steps, N), device=self.device)
 
         for step in range(num_steps):
-            global_obs = self.env.get_global_state()
+            if step > 0:
+                global_obs = self.env.get_global_state()
+                # Shift frames left and insert new frame at the end
+                rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
+                rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
+
+            flat_obs = rolling_obs.view(N, -1)
+            flat_global_obs = rolling_global_obs.view(N, -1)
             
-            b_obs[step] = obs
-            b_global_obs[step] = global_obs
+            b_obs[step] = flat_obs
+            b_global_obs[step] = flat_global_obs
 
             with torch.no_grad():
-                action, logprob, _, norm_value = self.brain.get_action_and_value(obs, global_obs)
+                action, logprob, _, norm_value = self.brain.get_action_and_value(flat_obs, flat_global_obs)
                 value = self.value_normalizer.denormalize(norm_value)
 
             next_obs, rewards, dones = self.env.step(action)
@@ -115,8 +130,19 @@ class PPOTrainer:
             b_rewards[step]  = rewards
             b_dones[step]    = dones.float()
             b_values[step]   = value.flatten()
+            
+            # Flush history for agents that died to prevent carrying over dead state momentum
+            if dones.any():
+                dead_mask = dones.bool()
+                rolling_obs[dead_mask] = next_obs[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
+                # Next iteration's global obs will be fetched at the start of the next step
 
             obs = next_obs
+
+        # Prepare final rolled frames for GAE bootstrapping
+        global_obs = self.env.get_global_state()
+        rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
+        rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
 
         return {
             "obs":      b_obs,
@@ -126,8 +152,8 @@ class PPOTrainer:
             "rewards":  b_rewards,
             "dones":    b_dones,
             "values":   b_values,
-            "final_obs": obs,               # (N, 16) tensor
-            "final_global_obs": self.env.get_global_state(),
+            "final_obs": rolling_obs.view(N, -1),
+            "final_global_obs": rolling_global_obs.view(N, -1),
         }
 
     def compute_advantages(self, rollouts):

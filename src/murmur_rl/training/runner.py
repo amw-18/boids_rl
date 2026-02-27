@@ -40,6 +40,8 @@ def main():
         "max_grad_norm": 0.5,
         "update_epochs": 4,          # PPO passes over the rollout buffer
         "batch_size": 1024,          # Large batch for stable gradient
+        
+        "stacked_frames": 3,         # POMDP History context
     }
 
     # Initialize standard Weights and Biases project
@@ -81,7 +83,13 @@ def main():
     # --- 3. Initialize Shared Brain ---
     obs_dim = 18
     global_obs_dim = env.global_obs_dim
-    brain = StarlingBrain(obs_dim=obs_dim, global_obs_dim=global_obs_dim, action_dim=3, hidden_size=64)
+    brain = StarlingBrain(
+        obs_dim=obs_dim, 
+        global_obs_dim=global_obs_dim, 
+        action_dim=3, 
+        hidden_size=64, 
+        stacked_frames=config["stacked_frames"]
+    )
     
     start_epoch = 1
     if args.resume:
@@ -136,6 +144,7 @@ def main():
         max_grad_norm=config["max_grad_norm"],
         update_epochs=config["update_epochs"],
         batch_size=config["batch_size"],
+        stacked_frames=config["stacked_frames"],
     )
     
     os.makedirs(args.checkpoints_dir, exist_ok=True)
@@ -146,15 +155,17 @@ def main():
     #  5-7: local_alignment (3)  |  8-10: com_direction (3)
     #  11: d_norm (1)  |  12: v_close_norm (1)  |  13: loom_norm (1)
     #  14: in_front (1)  |  15: closest_wall_norm (1)
-    COL_PREDATOR_DIST = 11
-    COL_LOCAL_DENSITY = 4
+    # The newest frame in the stack is located at the end.
+    offset = (config["stacked_frames"] - 1) * obs_dim
+    COL_PREDATOR_DIST = 11 + offset
+    COL_LOCAL_DENSITY = 4 + offset
 
     for epoch in range(start_epoch, config["num_epochs"] + 1):
         
         # Collect experiences
         rollouts = trainer.collect_rollouts(num_steps=config["rollout_steps"])
         
-        # Calculate custom biological metrics from the tensor buffer (steps, N, 16)
+        # Calculate custom biological metrics from the tensor buffer (steps, N, D)
         mean_predator_dist_norm = rollouts["obs"][:, :, COL_PREDATOR_DIST].mean().item()
         actual_predator_dist = mean_predator_dist_norm * (config["space_size"] / 2.0)
         
