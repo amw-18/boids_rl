@@ -65,7 +65,7 @@ class RLVision3D:
         self.brain.eval()
         
         self.obs = self.env.reset()
-        global_obs = self.env.get_global_state()
+        global_obs = self.env.get_global_state(self.obs)
         
         # Initialize temporal frame buffer for inference
         self.rolling_obs = self.obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
@@ -98,7 +98,7 @@ class RLVision3D:
     def update(self, frame):
         # Shift temporal frame buffers left and insert new observed frame at the end
         if frame > 0:
-            global_obs = self.env.get_global_state()
+            global_obs = self.env.get_global_state(self.obs)
             self.rolling_obs = torch.cat([self.rolling_obs[:, 1:, :], self.obs.unsqueeze(1)], dim=1)
             self.rolling_global_obs = torch.cat([self.rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
             

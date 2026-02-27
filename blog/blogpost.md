@@ -93,7 +93,7 @@ The reward scheme now utilizes dense spatial potentials:
 ### Neural Architecture: MAPPO
 We utilize Multi-Agent Proximal Policy Optimization (MAPPO), an actor-critic algorithm highly suited for multi-agent swarm environments.
 *   **Shared Actor Network:** A multi-layer perceptron (two hidden layers of 64 units with Tanh activations) processes the 18D local observation space to output a probability distribution over the continuous 3D action space. By sharing the actor network weights, all agents learn a unified, symmetrical behavioral policy.
-*   **Centralized Critic:** To resolve the massive credit assignment problem in a dense swarm, our Critic network (256 hidden units) possesses total omniscience during training. It evaluates the concatenated global observation state of all entities to guide the Actor's policy updates. During simulation (inference), the Critic is discarded, and agents act purely on decentralized local perception.
+*   **Centralized Critic (Mean-Field MAPPO):** To resolve the massive credit assignment problem in dense swarms while avoiding the Curse of Dimensionality (POMAC), our Critic network (256 hidden units) utilizes a Mean-Field approximation. Rather than processing an explicitly concatenated global state vector of every entity—which mathematically explodes as the swarm grows—the critic evaluates the focal agent's local observation concatenated with the continuous statistical mean state of the living swarm and predators. During simulation (inference), the Critic is discarded, and agents act purely on decentralized local perception.
 
 ## Results
 

@@ -253,27 +253,35 @@ class VectorMurmurationEnv:
 
         return obs
         
-    def get_global_state(self):
+    def get_global_state(self, local_obs):
         """
-        Returns the global state tensor for the Centralized Critic.
-        Shape: (N, global_obs_dim) -> Each agent gets a copy of the exact same global state.
-        Contains flattened arrays of all boid positions, velocities, alive masks, and predator state.
-        This provides perfect global omniscience to solve the Credit Assignment Problem.
+        Returns the global state tensor for the Centralized Critic using Mean-Field approximation.
+        Shape: (N, global_obs_dim)
+        Combines the focal agent's local observation with the mean state of the alive swarm.
+        This provides perfect global omniscience without the curse of dimensionality.
         """
-        pos = self.physics.positions.flatten() / self.space_size  # Normalized [0, 1]
-        vel = self.physics.velocities.flatten() / self.physics.base_speed
-        up = self.physics.up_vectors.flatten() # Normalized [-1, 1] internally
+        # 1. Calculate the Mean Field of the Swarm (only considering alive birds)
+        alive = self.physics.alive_mask.float().unsqueeze(1) # (N, 1)
+        num_alive = alive.sum().clamp(min=1.0) # Prevent divide by zero
         
+        mean_pos = (self.physics.positions * alive).sum(dim=0) / num_alive / self.space_size
+        mean_vel = (self.physics.velocities * alive).sum(dim=0) / num_alive / self.physics.base_speed
+        mean_up = (self.physics.up_vectors * alive).sum(dim=0) / num_alive 
+        
+        alive_ratio = (num_alive / self.n_agents).unsqueeze(0) # (1,)
+        
+        # 2. Flatten Predator State
         pred_pos = self.physics.predator_position.flatten() / self.space_size
         pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_speed
         
-        alive = self.physics.alive_mask.float()
+        # 3. Concatenate Mean Field
+        mean_field_state = torch.cat([mean_pos, mean_vel, mean_up, pred_pos, pred_vel, alive_ratio], dim=0) # (10 + P*6,)
         
-        # Concatenate everything into 1D global state vector
-        global_state_1d = torch.cat([pos, vel, up, pred_pos, pred_vel, alive], dim=0)
+        # 4. Expand Mean Field to match batch size N
+        expanded_mean_field = mean_field_state.unsqueeze(0).expand(self.n_agents, -1) # (N, 10 + P*6)
         
-        # Expand across all agents so each gets exactly the same global observation
-        global_state = global_state_1d.unsqueeze(0).expand(self.n_agents, -1)
+        # 5. Concatenate with Focal Local Observations
+        global_state = torch.cat([local_obs, expanded_mean_field], dim=1) # (N, obs_dim + mean_field_dim)
         
         return global_state
 

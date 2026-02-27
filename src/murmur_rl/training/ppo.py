@@ -89,7 +89,7 @@ class PPOTrainer:
         log_probs, rewards, values) as on-device tensors — no dicts, no numpy.
         """
         obs = self.env.reset()                      # (N, obs_dim) tensor on device
-        global_obs = self.env.get_global_state()
+        global_obs = self.env.get_global_state(obs)
 
         N = self.env.n_agents
         
@@ -97,9 +97,11 @@ class PPOTrainer:
         rolling_obs = obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
         rolling_global_obs = global_obs.unsqueeze(1).repeat(1, self.stacked_frames, 1)
 
+        actual_global_obs_dim = global_obs.shape[-1]
+        
         # Pre-allocate buffers
         b_obs      = torch.empty((num_steps, N, self.stacked_frames * self.env.obs_dim), device=self.device)
-        b_global_obs = torch.empty((num_steps, N, self.stacked_frames * self.env.global_obs_dim), device=self.device)
+        b_global_obs = torch.empty((num_steps, N, self.stacked_frames * actual_global_obs_dim), device=self.device)
         b_actions  = torch.empty((num_steps, N, self.env.action_dim), device=self.device)
         b_logprobs = torch.empty((num_steps, N), device=self.device)
         b_rewards  = torch.empty((num_steps, N), device=self.device)
@@ -108,7 +110,7 @@ class PPOTrainer:
 
         for step in range(num_steps):
             if step > 0:
-                global_obs = self.env.get_global_state()
+                global_obs = self.env.get_global_state(obs)
                 # Shift frames left and insert new frame at the end
                 rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
                 rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
@@ -140,7 +142,7 @@ class PPOTrainer:
             obs = next_obs
 
         # Prepare final rolled frames for GAE bootstrapping
-        global_obs = self.env.get_global_state()
+        global_obs = self.env.get_global_state(obs)
         rolling_obs = torch.cat([rolling_obs[:, 1:, :], obs.unsqueeze(1)], dim=1)
         rolling_global_obs = torch.cat([rolling_global_obs[:, 1:, :], global_obs.unsqueeze(1)], dim=1)
 

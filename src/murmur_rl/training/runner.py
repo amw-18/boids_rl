@@ -81,8 +81,11 @@ def main():
     env.physics.max_force = config["max_force"]
     
     # --- 3. Initialize Shared Brain ---
+    dummy_obs = env.reset()
+    dummy_global_obs = env.get_global_state(dummy_obs)
+    
     obs_dim = 18
-    global_obs_dim = env.global_obs_dim
+    global_obs_dim = dummy_global_obs.shape[-1]
     brain = StarlingBrain(
         obs_dim=obs_dim, 
         global_obs_dim=global_obs_dim, 
