@@ -69,6 +69,17 @@ class BoidsPhysics:
         speeds = torch.norm(rand_vel, dim=-1, keepdim=True).clamp(min=1e-5)
         self.velocities = (rand_vel / speeds) * self.base_speed
         
+        # Initialize up vectors (orthogonal to velocities)
+        z_axis = torch.zeros_like(self.velocities)
+        z_axis[:, 2] = 1.0
+        # If velocity is exactly along Z, use Y-axis as base
+        z_axis = torch.where(torch.abs(self.velocities[:, 2:3] / self.base_speed) > 0.99, torch.tensor([0.0, 1.0, 0.0], device=self.device), z_axis)
+        
+        right = torch.cross(self.velocities / self.base_speed, z_axis, dim=-1)
+        right = right / torch.norm(right, dim=-1, keepdim=True).clamp(min=1e-5)
+        self.up_vectors = torch.cross(right, self.velocities / self.base_speed, dim=-1)
+        self.up_vectors = self.up_vectors / torch.norm(self.up_vectors, dim=-1, keepdim=True).clamp(min=1e-5)
+        
         # Initialize Predator State
         # Start predators randomly on the boundary
         predator_pos = torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * self.space_size
@@ -94,56 +105,58 @@ class BoidsPhysics:
         Advance the physics by one timestep.
         
         Args:
-            actions: Tensor of shape (num_boids, 3) representing external forces / RL agent actions.
-                     This is the primary steering force.
+            actions: Tensor of shape (num_boids, 3) representing (Thrust, Roll Rate, Pitch Rate) in [-1, 1].
         """
-        # BOUNDARY AVOIDANCE (Soft boundaries removed)
-        # We enforce boundaries purely via RL rewards now (Agent dies if it goes out of bounds)
-        total_force = torch.zeros_like(self.positions)
-        
-        # Apply external/RL actions if provided
-        if actions is not None:
-            # We assume actions are additional force vectors provided by the NN
-            total_force += actions
+        if actions is None:
+            actions = torch.zeros((self.num_boids, 3), device=self.device)
             
-        # Limit total external force per timestep
-        force_magnitudes = torch.norm(total_force, dim=-1, keepdim=True).clamp(min=1e-5)
-        total_force = torch.where(
-            force_magnitudes > self.max_force,
-            (total_force / force_magnitudes) * self.max_force,
-            total_force
-        )
+        thrust_action = actions[:, 0:1] # [-1, 1]
+        roll_action = actions[:, 1:2]   # [-1, 1]
+        pitch_action = actions[:, 2:3]  # [-1, 1]
         
-        # Current heading
+        # Apply scaling based on physics limits
+        thrust = thrust_action * self.max_force
+        roll_angle = roll_action * self.max_turn_angle
+        pitch_angle = pitch_action * self.max_turn_angle
+        
+        # 1. Orientation
         speed = torch.norm(self.velocities, dim=-1, keepdim=True).clamp(min=1e-5)
-        current_heading = self.velocities / speed
+        forward = self.velocities / speed
+        up = self.up_vectors
+        # Right vector (Orthogonal to Forward and Up)
+        right = torch.cross(forward, up, dim=-1)
+        right = right / torch.norm(right, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        # Desired heading based on applied steering forces
-        new_v = self.velocities + total_force * self.dt
-        new_speed = torch.norm(new_v, dim=-1, keepdim=True).clamp(min=1e-5)
-        desired_heading = new_v / new_speed
+        # Roll: Rotate Up and Right around Forward
+        cos_r = torch.cos(roll_angle)
+        sin_r = torch.sin(roll_angle)
         
-        # Compute angle between current taking and desired heading
-        dot = (current_heading * desired_heading).sum(dim=-1, keepdim=True).clamp(-1.0, 1.0)
-        angle = torch.acos(dot)
+        up_rolled = up * cos_r + right * sin_r
         
-        # Orthogonal projection for rotation plane
-        w = desired_heading - dot * current_heading
-        w_norm = torch.norm(w, dim=-1, keepdim=True).clamp(min=1e-5)
-        w_unit = w / w_norm
+        # Pitch: Rotate Forward and Up_rolled around Right_rolled
+        cos_p = torch.cos(pitch_angle)
+        sin_p = torch.sin(pitch_angle)
         
-        # Clamp turn angle to the steering cone (max_turn_angle)
-        turn_angle = torch.clamp(angle, max=self.max_turn_angle)
+        forward_new = forward * cos_p + up_rolled * sin_p
+        up_new = up_rolled * cos_p - forward * sin_p
         
-        # Spherical linear interpolation towards desired heading
-        final_heading = torch.cos(turn_angle) * current_heading + torch.sin(turn_angle) * w_unit
+        # Normalize to prevent numerical drift
+        forward_new = forward_new / torch.norm(forward_new, dim=-1, keepdim=True).clamp(min=1e-5)
+        up_new = up_new / torch.norm(up_new, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        # Safeguard against tiny angles causing numerical instability
-        final_heading = torch.where(angle < 1e-4, desired_heading, final_heading)
-        final_heading = final_heading / torch.norm(final_heading, dim=-1, keepdim=True).clamp(min=1e-5)
+        # Re-enforce strict orthogonality for the next frame
+        right_new = torch.cross(forward_new, up_new, dim=-1)
+        right_new = right_new / torch.norm(right_new, dim=-1, keepdim=True).clamp(min=1e-5)
+        self.up_vectors = torch.cross(right_new, forward_new, dim=-1)
+        self.up_vectors = self.up_vectors / torch.norm(self.up_vectors, dim=-1, keepdim=True).clamp(min=1e-5)
         
-        # Enforce exactly constant base speed
-        self.velocities = final_heading * self.base_speed
+        # 2. Velocity & Thrust
+        new_speed = speed + thrust * self.dt
+        
+        # Aerodynamic Limits: Cap speed between 0.5 and 10.0
+        new_speed = torch.clamp(new_speed, min=0.5, max=10.0)
+        
+        self.velocities = forward_new * new_speed
         
         # Kill velocities of dead boids so they freeze/fall out of sim
         self.velocities[~self.alive_mask] = 0.0

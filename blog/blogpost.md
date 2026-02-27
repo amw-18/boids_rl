@@ -25,27 +25,19 @@ Unlike traditional grid-world or unconstrained continuous environments, our phys
 
 At each timestep $\Delta t = 0.1$, the environment processes updates in the following highly specific manner:
 
-1.  **Force Application:** The neural network outputs an action vector $\mathbf{a}_i \in [-1, 1]^4$. This action is explicitly decoupled into a 3D directional vector and a 1D magnitude scaler.
-    *   **Direction:** The first three dimensions form $\vec{d}_i$, which is L2-normalized to a strict unit vector $\hat{d}_i = \vec{d}_i / |\vec{d}_i|$.
-    *   **Magnitude:** The fourth dimension $m_i \in [-1, 1]$ is linearly mapped to a strict multiplier $M_i \in [0, 1]$ via $M_i = (m_i + 1.0) / 2.0$.
-    The environment then calculates the total steering force by scaling the direction by the targeted magnitude and the maximum physical force limit $F_{max} = 2.0$:
-    $$
-    F_{total} = \hat{d}_i \cdot M_i \cdot F_{max}
-    $$
-    This permits the neural network to output anywhere from $0$ force to $F_{max}$ force in any arbitrary spherical direction.
-
-2.  **Kinematic Update:** We compute a theoretical "desired" velocity based on Newtonian momentum:
-    $$
-    \vec{v}_{des} = \vec{v}_t + F_{total} \Delta t
-    $$
-
-3.  **Steering Cone Constraint (SLERP):** Real birds are limited by turning radii. We determine the angle $\theta$ between the current heading $\hat{v}_t$ and the desired heading $\hat{v}_{des}$. 
-    $$
-    \theta = \arccos(\hat{v}_t \cdot \hat{v}_{des})
-    $$
-    The actual turn angle is clamped to a maximum physiological limit, $\theta_{turn} = \min(\theta, \theta_{max})$. We then use Spherical Linear Interpolation to generate the final heading, ensuring smooth, arcing flight paths.
-
-4.  **Constant Velocity:** To maintain aerodynamic realism, the magnitude of the velocity is ignored. The final heading vector is multiplied by a rigid constant $v_{base} = 5.0$, meaning boids fly continuously forward at a fixed speed. Positions are updated via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$.
+28: 1.  **Force Application:** The neural network outputs an action vector $\mathbf{a}_i \in [-1, 1]^3$. This action explicitly maps to the 6-DOF controls of flight: Thrust, Roll Rate, and Pitch Rate.
+29:     *   **Thrust:** The first dimension dictates forward acceleration along the bird's local forward axis, scaled by $F_{max}$.
+30:     *   **Roll and Pitch:** The second and third dimensions apply angular rotation rates around the bird's local forward and right axes, respectively, allowing banking and diving.
+31:     The environment computes these localized spherical rotations (e.g., Rodrigues' rotation formula) to maintain mathematically rigorous tracking of each agent's full 3D orientation (Forward, Right, Up) at all times.
+32: 
+33: 2.  **Kinematic Update:** We compute the new velocity based on Newtonian momentum and the applied Thrust force, updating the velocity vector dynamically:
+34:     $$
+35:     \vec{v}_{t+1} = \vec{v}_t + (Thrust \cdot \hat{v}_t) \Delta t
+36:     $$
+37: 
+38: 3.  **Aerodynamic Drag and Constraints:** Real birds are limited by air resistance and physiological limits. We enforce a strict speed capacity, clipping the magnitude of the velocity vector between $v_{min} = 0.5$ and $v_{max} = 10.0$ to prevent infinite acceleration while preserving fluid momentum.
+39: 
+40: 4.  **Constant Position Update:** Finally, positions are updated natively via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$. By stripping away unnatural static velocity assignments, agents must learn to regulate their own speed inline with their turning radii and survival needs.
 
 ### The Predator Mechanics: The Falcon State Machine
 To introduce realistic, dynamic survival pressure, we designed "Falcon" predator agents governed by a robust, non-differentiable state machine. Predators fly faster ($1.5 \times v_{base}$) and turn tighter ($1.5 \times \theta_{max}$) than boids. Their behavior loops through four strict states:

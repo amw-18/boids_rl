@@ -25,36 +25,40 @@ class RLVision3D:
         self.env.physics.max_turn_angle = 0.5
         self.env.physics.max_force = 2.0
         
-        # Load checkpoint directly to find the expected Critic dimensions
-        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
-        
-        # Determine global_obs_dim dynamically so we don't crash when running simulation 
-        # with a different number of boids than training
-        if 'critic.0.weight' in checkpoint:
-            expected_global_obs_dim = checkpoint['critic.0.weight'].shape[1]
+        if checkpoint_path is not None:
+            # Load checkpoint directly to find the expected Critic dimensions
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
+            
+            # Determine global_obs_dim dynamically so we don't crash when running simulation 
+            # with a different number of boids than training
+            if 'critic.0.weight' in checkpoint:
+                expected_global_obs_dim = checkpoint['critic.0.weight'].shape[1]
+            else:
+                expected_global_obs_dim = self.env.global_obs_dim  # Fallback
         else:
-            expected_global_obs_dim = self.env.global_obs_dim  # Fallback
+            expected_global_obs_dim = self.env.global_obs_dim
             
         # Initialize RL Brain
         self.brain = StarlingBrain(
             obs_dim=18, 
             global_obs_dim=expected_global_obs_dim, 
-            action_dim=4, 
+            action_dim=3, 
             hidden_size=64
         ).to(self.device)
         
-        try:
-            self.brain.load_state_dict(checkpoint, strict=False)
-        except RuntimeError as e:
-            if "size mismatch" in str(e):
-                print(f"\n[ERROR] Checkpoint Loading Failed: Size Mismatch")
-                print(f"The checkpoint '{checkpoint_path}' appears to be trained on an older version of the environment.")
-                print("The observation space has been upgraded from 16 to 18 dimensions (3D boundary relative positions).")
-                print("Please train a new agent to use with the current environment.")
-                import sys
-                sys.exit(1)
-            else:
-                raise e
+        if checkpoint_path is not None:
+            try:
+                self.brain.load_state_dict(checkpoint, strict=False)
+            except RuntimeError as e:
+                if "size mismatch" in str(e):
+                    print(f"\n[ERROR] Checkpoint Loading Failed: Size Mismatch")
+                    print(f"The checkpoint '{checkpoint_path}' appears to be trained on an older version of the environment.")
+                    print("The observation space has been upgraded from 16 to 18 dimensions (3D boundary relative positions).")
+                    print("Please train a new agent to use with the current environment.")
+                    import sys
+                    sys.exit(1)
+                else:
+                    raise e
                 
         self.brain.eval()
         
@@ -91,15 +95,8 @@ class RLVision3D:
             # Use deterministic actions for visualization
             action_batch = action_mean 
             
-        # Convert batched tensor actions to PettingZoo Dict format
-        # actions_batch is (N, 4)
-        action_dict = {
-            agent: action_batch[i].cpu().numpy() 
-            for i, agent in enumerate(self.env.possible_agents) 
-            if agent in self.env.agents
-        }
-            
-        self.obs, rewards, dones, truncs, infos = self.env.step(action_dict)
+        # Step Vector Env directly with Tensor
+        self.obs, rewards, dones = self.env.step(action_batch)
         
         # Update Boid scatter plot data (only alive)
         alive = self.env.physics.alive_mask.cpu().numpy()
@@ -147,7 +144,7 @@ class RLVision3D:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", type=str, default="checkpoints1/starling_brain_ep5000.pth")
+    parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--save", type=str, default="murmuration_rl.gif")
     parser.add_argument("--frames", type=int, default=1800)
     parser.add_argument("--num-boids", type=int, default=250)

@@ -48,8 +48,8 @@ class VectorMurmurationEnv:
         self.obs_dim = 18
         
         # Centralized Critic Global State Dimension:
-        # ALL positions (N * 3) + ALL velocities (N * 3) + Predator Pos (P * 3) + Predator Vel (P * 3) + Alive Mask (N)
-        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + (num_predators * 3) + (num_predators * 3) + num_agents
+        # ALL positions (N * 3) + ALL velocities (N * 3) + ALL up_vectors (N * 3) + Predator Pos (P * 3) + Predator Vel (P * 3) + Alive Mask (N)
+        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + (num_agents * 3) + (num_predators * 3) + (num_predators * 3) + num_agents
         
         self.action_dim = 3
         self.num_moves = 0
@@ -113,9 +113,8 @@ class VectorMurmurationEnv:
             rewards: (N,) tensor
             dones: (N,) bool tensor  (True = terminated or truncated)
         """
-        # Scale actions and step physics
-        scaled = actions * self.physics.max_force
-        self.physics.step(actions=scaled)
+        # Step physics using Thrust, Roll, Pitch actions [-1, 1]
+        self.physics.step(actions=actions)
         self.num_moves += 1
 
         obs = self._get_observations()
@@ -249,6 +248,7 @@ class VectorMurmurationEnv:
         """
         pos = self.physics.positions.flatten() / self.space_size  # Normalized [0, 1]
         vel = self.physics.velocities.flatten() / self.physics.base_speed
+        up = self.physics.up_vectors.flatten() # Normalized [-1, 1] internally
         
         pred_pos = self.physics.predator_position.flatten() / self.space_size
         pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_speed
@@ -256,7 +256,7 @@ class VectorMurmurationEnv:
         alive = self.physics.alive_mask.float()
         
         # Concatenate everything into 1D global state vector
-        global_state_1d = torch.cat([pos, vel, pred_pos, pred_vel, alive], dim=0)
+        global_state_1d = torch.cat([pos, vel, up, pred_pos, pred_vel, alive], dim=0)
         
         # Expand across all agents so each gets exactly the same global observation
         global_state = global_state_1d.unsqueeze(0).expand(self.n_agents, -1)

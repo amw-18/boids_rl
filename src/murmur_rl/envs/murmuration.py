@@ -58,11 +58,10 @@ class MurmurationEnv(ParallelEnv):
         
         # Spaces are defined in NumPy for PettingZoo standard compliance,
         # even though computation is in PyTorch.
-        # Action space: 4D continuous vector
-        # [0, 1, 2] -> 3D Directional heading vector [-1, 1]
-        # [3]       -> Magnitude scaler mapped to [0, 1] then multiplied by max_force
+        # Action space: 3D continuous vector
+        # [0] -> Thrust, [1] -> Roll, [2] -> Pitch
         self.action_spaces = {
-            agent: Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32) for agent in self.possible_agents
+            agent: Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32) for agent in self.possible_agents
         }
         self.observation_spaces = {
             agent: Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32) for agent in self.possible_agents
@@ -98,25 +97,11 @@ class MurmurationEnv(ParallelEnv):
 
         # Convert dictionary of actions to PyTorch tensor
         # Map over possible_agents directly to preserve shape N
-        # Actions are 4D (Direction X, Y, Z, Magnitude Logit)
-        action_list = [actions.get(agent, np.zeros(4)) for agent in self.possible_agents]
+        # Actions are 3D
+        action_list = [actions.get(agent, np.zeros(3)) for agent in self.possible_agents]
         action_tensor = torch.tensor(np.array(action_list), dtype=torch.float32, device=self.device)
         
-        # Split action into Direction and Magnitude
-        direction = action_tensor[:, 0:3] # (N, 3)
-        magnitude_logit = action_tensor[:, 3:4] # (N, 1)
-        
-        # 1. Normalize Direction to unit vector
-        direction_norm = direction / torch.norm(direction, dim=-1, keepdim=True).clamp(min=1e-5)
-        
-        # 2. Scale Magnitude from logit [-1, 1] to [0, 1] using Sigmoid (or linear scaling)
-        # Using simple linear scaling from [-1, 1] to [0, 1] is standard
-        magnitude_scale = (magnitude_logit + 1.0) / 2.0 
-        
-        # 3. Apply Fmax scale
-        final_force = direction_norm * magnitude_scale * self.physics.max_force
-        
-        self.physics.step(actions=final_force)
+        self.physics.step(actions=action_tensor)
         
         self.num_moves += 1
 
@@ -285,14 +270,32 @@ class MurmurationEnv(ParallelEnv):
                              (pos[:, 1] < 0) | (pos[:, 1] > self.space_size) | \
                              (pos[:, 2] < 0) | (pos[:, 2] > self.space_size)
         
-        # Also maintain a small psychological deterrent for getting too close to the wall
+        # Continuous boundary penalty
         margin = self.space_size * 0.1
-        dist_to_bounds_x = torch.min(pos[:, 0], self.space_size - pos[:, 0]).unsqueeze(1)
-        dist_to_bounds_y = torch.min(pos[:, 1], self.space_size - pos[:, 1]).unsqueeze(1)
-        dist_to_bounds_z = torch.min(pos[:, 2], self.space_size - pos[:, 2]).unsqueeze(1)
-        closest_wall = torch.min(torch.cat([dist_to_bounds_x, dist_to_bounds_y, dist_to_bounds_z], dim=1), dim=1, keepdim=True)[0].squeeze(1)
-        penetration = torch.clamp(margin - closest_wall, min=0.0)
-        boundary_warning_penalty = -5.0 * (penetration / margin)
+        
+        # Original XY boundaries
+        dist_lo_xy = pos[:, :2]
+        dist_hi_xy = self.space_size - pos[:, :2]
+        closest_wall_xy = torch.min(dist_lo_xy, dist_hi_xy).min(dim=1).values
+        penetration_xy = torch.clamp(margin - closest_wall_xy, min=0.0)
+        boundary_penalty_xy = -10.0 * (penetration_xy / margin)
+        
+        # New Z-bound penalty (Floor=0, Ceiling=0.85)
+        z_pos = pos[:, 2]
+        ceiling = self.space_size * 0.85
+        dist_lo_z = z_pos
+        dist_hi_z = ceiling - z_pos
+        
+        # Penalize approaching the floor or the lowered ceiling
+        closest_wall_z = torch.min(dist_lo_z, dist_hi_z)
+        penetration_z = torch.clamp(margin - closest_wall_z, min=0.0)
+        
+        # Make the ceiling penalty much steeper to discourage hiding near predators
+        is_ceiling = dist_hi_z < dist_lo_z
+        penalty_z_mult = torch.where(is_ceiling, 20.0, 10.0)
+        boundary_penalty_z = -penalty_z_mult * (penetration_z / margin)
+        
+        boundary_warning_penalty = (boundary_penalty_xy + boundary_penalty_z).unsqueeze(1)
         
         for i, agent in enumerate(self.possible_agents):
             if agent in self.dead_agents:
