@@ -176,7 +176,7 @@ class TestPhysicsVelocity:
             old_speed = torch.tensor([5.0, 5.0, 0.5, 9.9])[i].item()
             thrust = actions[i, 0].item() * phys.max_force
             new_speed = old_speed + thrust * phys.dt
-            new_speed = max(0.5, min(10.0, new_speed))
+            new_speed = max(0.5, min(phys.base_speed, new_speed))
             expected_speeds.append(new_speed)
 
         actual_speeds = phys.velocities.norm(dim=-1)

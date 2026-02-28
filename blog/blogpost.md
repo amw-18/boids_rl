@@ -42,7 +42,7 @@ At each timestep $\Delta t = 0.1$, the environment processes updates in the foll
 ### The Predator Mechanics: Co-Evolution and Visual Obfuscation
 To introduce realistic, dynamic survival pressure without generating exploitable mathematical thresholds, we transitioned the environment to a **Multi-Agent Competitive Co-Evolution** framework. The Predators are not governed by static rules; they are independent Reinforcement Learning agents trained simultaneously against the Starlings in a zero-sum Markov Game.
 
-Instead of a state machine, Predators fly using identical 6-DOF continuous actions (Thrust, Roll Rate, Pitch Rate) but are equipped with physical advantages ($1.5 \times v_{base}$ and $1.5 \times \theta_{max}$) and stamina mechanics. Sprinting drains their energy, forcing periodic cruising.
+Instead of a state machine, Predators fly using identical 6-DOF continuous actions (Thrust, Roll Rate, Pitch Rate) but are equipped with physical advantages ($1.5 \times v_{base}$ and $1.5 \times \theta_{max}$) and stamina mechanics. Sprinting drains their energy, forcing periodic cruising. Furthermore, to simulate biological hunger and drive continuous hunting, Predators incur a dynamically scaling negative reward for every timestep they spend outside of their post-catch cooldown period without capturing prey.
 
 To biologically prevent the Predators from overpowering the Starlings via pure speed, we engineered a core psychological mechanic: **Visual Obfuscation**.
 1. **Perception Noise**: When a Predator observes its 5 closest Starling targets, the environment calculates each target's local flock density $\rho_i$. 
@@ -81,7 +81,7 @@ The core philosophy of our approach is that **flocking is not explicitly rewarde
 The reward scheme now utilizes dense spatial potentials:
 *   **Survival:** $+0.1$ base reward for every frame survived without capture.
 *   **Death Penalty (Predators Only):** First-time transition to the "dead" state via predator capture incurs a stark terminal $-100.0$ penalty. The fatal out-of-bounds crash penalty has been removed in favor of continuous spatial potentials.
-*   **Collision Penalty:** To implicitly enforce the instinctual "Separation" rule, peer collisions ($d < 1.0$) incur a $-2.0$ penalty.
+*   **Collision Penalty:** To implicitly enforce the instinctual "Separation" rule, peer collisions ($d < 2.0$) incur a $-2.0$ penalty.
 *   **Boundary Potential ($\Phi_{bounds}$):** Instead of invisible walls or terminal deaths, we apply a continuous potential function that scales with the squared distance from the environment's center: $\Phi_{bounds}(s) = -k \cdot (d_{center})^2$. This safely herds agents inward without destroying learning gradients.
 *   **Density Potential ($\Phi_{density}$):** To accelerate the discovery of murmuration Nash Equilibria without hardcoding Boid rules, agents receive dense reinforcement to move toward localized clusters of peers: $\Phi_{density}(s) = c \cdot \rho_i$.
 *   **PBRS Integration:** The final shaping reward added to the environment is mathematically strictly defined as $F(s, a, s') = \gamma \Phi(s') - \Phi(s)$, guaranteeing optimal policy invariance while providing dense guidance.

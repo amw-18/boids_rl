@@ -10,8 +10,10 @@ def _sync_envs(vec_env, pz_env):
     pz_env.physics.positions = vec_env.physics.positions.clone()
     pz_env.physics.velocities = vec_env.physics.velocities.clone()
     pz_env.physics.alive_mask = vec_env.physics.alive_mask.clone()
+    pz_env.physics.up_vectors = vec_env.physics.up_vectors.clone()
     pz_env.physics.predator_position = vec_env.physics.predator_position.clone()
     pz_env.physics.predator_velocity = vec_env.physics.predator_velocity.clone()
+    pz_env.physics.predator_time_since_cooldown = vec_env.physics.predator_time_since_cooldown.clone()
 
 def test_extreme_cases():
     N = 10
@@ -42,19 +44,32 @@ def test_extreme_cases():
     
     _sync_envs(vec_env, pz_env)
     
+    # Sync death tracking for agent 4 which we manually killed
+    vec_env._dead_mask[4] = True
+    pz_env.dead_agents.add("boid_4")
+    
+    # After forcibly moving agents, we must synchronize the PBRS potentials 
+    # so the first step doesn't generate massive shaping rewards.
+    _, pz_potentials = pz_env._get_rewards()
+    for i in range(N):
+        pz_env.last_potential[f"boid_{i}"] = pz_potentials[f"boid_{i}"]
+        
+    _, _, _, new_pot, _ = vec_env._get_rewards()
+    vec_env.last_potential = new_pot.clone()
+    
     # Run for 15 steps
     for step in range(15):
         # Step vec env
         actions = torch.randn(N, 3).clamp(-1, 1)
-        vec_obs, vec_rewards, vec_dones = vec_env.step(actions)
+        vec_obs, vec_pred_obs, vec_rewards, vec_pred_rewards, vec_dones = vec_env.step(actions)
         
         # Step PettingZoo env
-        pz_actions = {f"starling_{i}": actions[i].numpy() for i in range(N)}
+        pz_actions = {f"boid_{i}": actions[i].numpy() for i in range(N)}
         pz_obs_dict, pz_rewards_dict, pz_terms, pz_truncs, infos = pz_env.step(pz_actions)
         
         # Compare
         for i in range(N):
-            agent = f"starling_{i}"
+            agent = f"boid_{i}"
             v_obs = vec_obs[i]
             p_obs = torch.tensor(pz_obs_dict[agent])
             if not torch.allclose(v_obs, p_obs, atol=1e-4):

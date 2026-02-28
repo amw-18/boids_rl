@@ -109,7 +109,7 @@ class MurmurationEnv(ParallelEnv):
         action_list = [actions.get(agent, np.zeros(3)) for agent in self.possible_agents]
         action_tensor = torch.tensor(np.array(action_list), dtype=torch.float32, device=self.device)
         
-        self.physics.step(actions=action_tensor)
+        self.physics.step(boid_actions=action_tensor)
         
         self.num_moves += 1
 
@@ -209,7 +209,7 @@ class MurmurationEnv(ParallelEnv):
         # 3. Closing Speed (v_close) (Normalized -1 to 1)
         # Max closing speed is roughly predator_speed + base_speed
         v_close = -torch.sum(dv * u, dim=-1, keepdim=True) # (N, 1)
-        max_v_close = self.physics.predator_speed + self.physics.base_speed
+        max_v_close = self.physics.predator_sprint_speed + self.physics.base_speed
         v_close_norm = torch.clamp(v_close / max_v_close, min=-1.0, max=1.0)
         
         # 4. Looming (Time-to-collision proxy) (Normalized/Clamped)
@@ -272,8 +272,8 @@ class MurmurationEnv(ParallelEnv):
         dist_matrix = torch.cdist(pos, pos)
         dist_matrix.fill_diagonal_(float('inf'))
         
-        # Collision: distance < 1.0 is bad
-        collision_count = (dist_matrix < 1.0).sum(dim=1).float()
+        # Collision: distance < 2.0 is bad
+        collision_count = (dist_matrix < 2.0).sum(dim=1).float()
         
         # Density for PBRS
         dist_matrix_masked = dist_matrix.clone()

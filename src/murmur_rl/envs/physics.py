@@ -7,6 +7,7 @@ class BoidsPhysics:
     """
     def __init__(
         self,
+        *,
         num_boids: int,
         num_predators: int = 1,
         space_size: float = 100.0,
@@ -15,7 +16,6 @@ class BoidsPhysics:
         base_speed: float = 5.0,
         max_turn_angle: float = 0.5, # radians per timestep
         max_force: float = 2.0,
-        boundary_weight: float = 2.0,
         dt: float = 0.1
     ):
         self.num_boids = num_boids
@@ -30,9 +30,6 @@ class BoidsPhysics:
         self.max_force = max_force
         self.dt = dt
         
-        # Rule weights (Soft boundary only, no hardcoded flocking)
-        self.boundary_weight = boundary_weight
-        
         # Predator properties
         self.predator_base_speed = base_speed
         self.predator_sprint_speed = base_speed * 1.5 
@@ -40,14 +37,15 @@ class BoidsPhysics:
         self.predator_catch_radius = 2.0
         
         # Co-Evolution Parameters: Stamina Economy
-        self.predator_max_stamina = 100.0 # Frames of total sprint capacity
-        self.predator_sprint_drain = 1.0  # Stamina lost per frame while sprinting
-        self.predator_recovery_rate = 0.5 # Stamina recovered per frame while cruising
+        self.predator_max_stamina = 100.0 # total sprint capacity
+        self.predator_sprint_drain = 1.0  # Stamina drain per frame while sprinting
+        self.predator_recovery_rate = 0.5 # Stamina recovery per frame while cruising
         
         # Track individual predator energy
         self.predator_stamina = torch.full((self.num_predators,), self.predator_max_stamina, device=self.device)
         self.predator_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
         self.predator_cooldown_duration = 50 # Frames disabled after a successful catch
+        self.predator_time_since_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
 
 
         self.reset()
@@ -80,11 +78,11 @@ class BoidsPhysics:
         self.up_vectors = self.up_vectors / torch.norm(self.up_vectors, dim=-1, keepdim=True).clamp(min=1e-5)
         
         # Initialize Predator State
-        # Start predators randomly on the boundary
         predator_pos = torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * self.space_size
-        axis = torch.randint(0, 3, (self.num_predators,))
-        for i in range(self.num_predators):
-            predator_pos[i, axis[i]] = 0.0 if torch.rand(1).item() > 0.5 else self.space_size
+        # Start predators randomly on the boundary
+        # axis = torch.randint(0, 3, (self.num_predators,))
+        # for i in range(self.num_predators):
+        #     predator_pos[i, axis[i]] = 0.0 if torch.rand(1).item() > 0.5 else self.space_size
         self.predator_position = predator_pos
         
         pred_vel = (torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * 2 - 1)
@@ -104,6 +102,7 @@ class BoidsPhysics:
         # Reset Co-Evolution state
         self.predator_stamina.fill_(self.predator_max_stamina)
         self.predator_cooldown.zero_()
+        self.predator_time_since_cooldown.zero_()
 
         # Boids that have been eaten (boolean mask, True = alive, False = dead)
         self.alive_mask = torch.ones(self.num_boids, dtype=torch.bool, device=self.device)
@@ -162,8 +161,8 @@ class BoidsPhysics:
         # 2. Velocity & Thrust
         new_speed = speed + thrust * self.dt
         
-        # Aerodynamic Limits: Cap speed between 0.5 and 10.0
-        new_speed = torch.clamp(new_speed, min=0.5, max=10.0)
+        # Aerodynamic Limits: Cap speed between 0.5 and base_speed
+        new_speed = torch.clamp(new_speed, min=0.5, max=self.base_speed)
         
         self.velocities = forward_new * new_speed
         
@@ -218,6 +217,12 @@ class BoidsPhysics:
         self.predator_cooldown = torch.clamp(self.predator_cooldown - 1, min=0)
         is_cooldown = self.predator_cooldown > 0
         
+        self.predator_time_since_cooldown = torch.where(
+            ~is_cooldown,
+            self.predator_time_since_cooldown + 1,
+            torch.zeros_like(self.predator_time_since_cooldown)
+        )
+        
         # Intent to sprint requires stamina > 0 and no cooldown
         is_sprinting = (sprint_action.squeeze(-1) > 0) & (self.predator_stamina > 0) & ~is_cooldown
         is_cruising = ~is_sprinting
@@ -263,3 +268,4 @@ class BoidsPhysics:
             # Apply cooldown to successful predators, freezing their ability to sprint
             # and slowing them down for the duration.
             self.predator_cooldown[caught_by_predator] = self.predator_cooldown_duration
+            self.predator_time_since_cooldown[caught_by_predator] = 0

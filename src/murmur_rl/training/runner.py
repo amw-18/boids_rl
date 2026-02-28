@@ -19,16 +19,16 @@ def main():
 
     # --- 1. Hyperparameter Configuration ---
     config = {
-        "num_agents": 250,           # Slightly fewer to keep FPS high during heavy training
-        "num_predators": 4,
-        "space_size": 100.0,
+        "num_agents": 100,           # Slightly fewer to keep FPS high during heavy training
+        "num_predators": 10,
+        "space_size": 50.0,
         "perception_radius": 15.0,
         "base_speed": 5.0,
         "max_turn_angle": 0.5,
         "max_force": 2.0,
         
-        "rollout_steps": 100,        # Timesteps collected before PPO update
-        "num_epochs": 5000,          # Total iterations
+        "rollout_steps": 500,        # Timesteps collected before PPO update
+        "num_epochs": 15000,          # Total iterations
         
         "actor_lr": 3e-4,
         "critic_lr": 1e-3,
@@ -50,7 +50,7 @@ def main():
         try:
             wandb.init(
                 project="murmur_rl",
-                name="ppo_continuous_run_cuda_fast1",
+                name="co-evolution run",
                 config=config,
                 mode="online"
             )

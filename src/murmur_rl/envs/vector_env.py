@@ -50,9 +50,10 @@ class VectorMurmurationEnv:
 
         self.obs_dim = 18
         
-        # Centralized Critic Global State Dimension:
-        # ALL positions (N * 3) + ALL velocities (N * 3) + ALL up_vectors (N * 3) + Predator Pos (P * 3) + Predator Vel (P * 3) + Alive Mask (N)
-        self.global_obs_dim = (num_agents * 3) + (num_agents * 3) + (num_agents * 3) + (num_predators * 3) + (num_predators * 3) + num_agents
+        # Centralized Critic Global State Dimension: (Mean-Field Approximation)
+        # Focal Agent Local Obs (self.obs_dim) + Swarm Mean Pos/Vel/Up (9) + Predator Pos/Vel (P*6) + Alive Ratio (1)
+        # = obs_dim + 10 + num_predators * 6
+        self.global_obs_dim = self.obs_dim + 10 + (num_predators * 6)
         
         self.action_dim = 3
         self.num_moves = 0
@@ -386,12 +387,12 @@ class VectorMurmurationEnv:
 
         nearest_dist = dist_matrix.min(dim=1).values
 
-        # Social: comfortable range (2, perception_radius]
-        comfortable = (dist_matrix > 2.0) & (dist_matrix <= self.perception_radius)
+        # Social: comfortable range [2, perception_radius]
+        comfortable = (dist_matrix >= 2.0) & (dist_matrix <= self.perception_radius)
         social_count = comfortable.sum(dim=1).float()
 
-        # Collisions: < 1.0
-        collision_count = (dist_matrix < 1.0).sum(dim=1).float()
+        # Collisions: < 2.0
+        collision_count = (dist_matrix < 2.0).sum(dim=1).float()
 
         # Predator deaths (physics already updated alive_mask)
         killed_by_predator = ~alive & ~self._dead_mask  # newly killed by predator
@@ -404,8 +405,9 @@ class VectorMurmurationEnv:
         d_center_sq = (pos_relative**2).sum(dim=-1)
         phi_bounds = -self._pbrs_k * d_center_sq
         
-        # 2. Density Potential (phi_density)
-        in_radius = dist_matrix < self.perception_radius
+        # 2. Density Potential (phi_density) — must mask dead agents like PZ env
+        dist_matrix_masked = torch.where(~alive.unsqueeze(0), self._inf, dist_matrix)
+        in_radius = (dist_matrix_masked < self.perception_radius) & alive.unsqueeze(0)
         local_density = in_radius.float().sum(dim=1) / self.n_agents
         phi_density = self._pbrs_c * local_density
         
@@ -436,11 +438,23 @@ class VectorMurmurationEnv:
         rewards_preds = torch.zeros(self.num_predators, device=self.device)
 
         # Catch reward: +10.0 per boid caught this step
+        catches_per_pred = torch.zeros(self.num_predators, device=self.device)
         if new_deaths.any():
             dist_pred_boid = torch.cdist(pred_pos, pos)  # (P, N)
             catch_matrix = dist_pred_boid < self.physics.predator_catch_radius  # (P, N)
             # Only count newly dead boids (not already-dead ones)
             catches_per_pred = (catch_matrix & new_deaths.unsqueeze(0)).float().sum(dim=1)  # (P,)
             rewards_preds += 10.0 * catches_per_pred
+
+        # Hunger penalty: scaled by timesteps since last cooldown end
+        is_cooldown = self.physics.predator_cooldown > 0
+        made_catch = catches_per_pred > 0
+        hunger_penalty = -0.01 * self.physics.predator_time_since_cooldown.float()
+        
+        rewards_preds += torch.where(
+            ~is_cooldown & ~made_catch,
+            hunger_penalty,
+            self._zero
+        )
 
         return rewards, rewards_preds, new_deaths, new_potential, pred_phi_bounds

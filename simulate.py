@@ -209,9 +209,9 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", type=str, default=None)
     parser.add_argument("--save", type=str, default="murmuration_rl.gif")
     parser.add_argument("--frames", type=int, default=1800)
-    parser.add_argument("--num-boids", type=int, default=250)
-    parser.add_argument("--num-predators", type=int, default=4)
-    parser.add_argument("--space-size", type=float, default=100.0)
+    parser.add_argument("--num-boids", type=int, default=100)
+    parser.add_argument("--num-predators", type=int, default=10)
+    parser.add_argument("--space-size", type=float, default=50.0)
     args = parser.parse_args()
     
     device_name = "cuda" if torch.cuda.is_available() else "cpu"
