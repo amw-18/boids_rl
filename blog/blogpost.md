@@ -3,7 +3,7 @@
 ## Introduction
 Starling murmurations are one of nature's most spectacular displays—thousands of birds moving in highly synchronized, fluid patterns that resemble a single, living entity. These complex aerial dances are not just visually stunning; they are hypothesized to be sophisticated survival mechanisms. By flocking closely, starlings optimize biological imperatives: confusing predators, facilitating social communication, and sharing aerodynamic effort.
 
-For decades, computer scientists have sought to replicate these dynamics. Traditionally, this was achieved using static, rule-based systems like Craig Reynolds' seminal 1986 *Boids* algorithm. While beautifully mimicking the end result, Boids relies on hardcoded parameters for separation, alignment, and cohesion. In the natural world, birds don't follow these explicit equations; they adapt their behavior based on evolutionary and real-time survival pressures.
+For decades, computer scientists have sought to replicate these dynamics. Traditionally, this was achieved using static, rule-based systems like Craig Reynolds' seminal 1987 *Boids* algorithm. While beautifully mimicking the end result, Boids relies on hardcoded parameters for separation, alignment, and cohesion. In the natural world, birds don't follow these explicit equations; they adapt their behavior based on evolutionary and real-time survival pressures.
 
 Our research shifts the paradigm from hardcoded rules to dynamic adaptation. By leveraging Multi-Agent Reinforcement Learning (MARL), we strip away explicit flocking instructions and instead equip artificial agents with basic biological senses and a singular objective: **survive**. This blogpost outlines the methodology of our custom simulation environment. We detail the strict mathematical foundation of our flight dynamics, perception, and predatory threats.
 
@@ -25,19 +25,19 @@ Unlike traditional grid-world or unconstrained continuous environments, our phys
 
 At each timestep $\Delta t = 0.1$, the environment processes updates in the following highly specific manner:
 
-28: 1.  **Force Application:** The neural network outputs an action vector $\mathbf{a}_i \in [-1, 1]^3$. This action explicitly maps to the 6-DOF controls of flight: Thrust, Roll Rate, and Pitch Rate.
-29:     *   **Thrust:** The first dimension dictates forward acceleration along the bird's local forward axis, scaled by $F_{max}$.
-30:     *   **Roll and Pitch:** The second and third dimensions apply angular rotation rates around the bird's local forward and right axes, respectively, allowing banking and diving.
-31:     The environment computes these localized spherical rotations (e.g., Rodrigues' rotation formula) to maintain mathematically rigorous tracking of each agent's full 3D orientation (Forward, Right, Up) at all times.
-32: 
-33: 2.  **Kinematic Update:** We compute the new velocity based on Newtonian momentum and the applied Thrust force, updating the velocity vector dynamically:
-34:     $$
-35:     \vec{v}_{t+1} = \vec{v}_t + (Thrust \cdot \hat{v}_t) \Delta t
-36:     $$
-37: 
-38: 3.  **Aerodynamic Drag and Constraints:** Real birds are limited by air resistance and physiological limits. We enforce a strict speed capacity, clipping the magnitude of the velocity vector between $v_{min} = 0.5$ and $v_{max} = 10.0$ to prevent infinite acceleration while preserving fluid momentum.
-39: 
-40: 4.  **Constant Position Update:** Finally, positions are updated natively via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$. By stripping away unnatural static velocity assignments, agents must learn to regulate their own speed inline with their turning radii and survival needs.
+1.  **Force Application:** The neural network outputs an action vector $\mathbf{a}_i \in [-1, 1]^3$. This action explicitly maps to the 6-DOF controls of flight: Thrust, Roll Rate, and Pitch Rate.
+    *   **Thrust:** The first dimension dictates forward acceleration along the bird's local forward axis, scaled by $F_{max}$.
+    *   **Roll and Pitch:** The second and third dimensions apply angular rotation rates around the bird's local forward and right axes, respectively, allowing banking and diving.
+    The environment computes these localized spherical rotations (e.g., Rodrigues' rotation formula) to maintain mathematically rigorous tracking of each agent's full 3D orientation (Forward, Right, Up) at all times.
+
+2.  **Kinematic Update:** We compute the new velocity based on Newtonian momentum and the applied Thrust force, updating the velocity vector dynamically:
+    $$
+    \vec{v}_{t+1} = \vec{v}_t + (Thrust \cdot \hat{v}_t) \Delta t
+    $$
+
+3.  **Aerodynamic Drag and Constraints:** Real birds are limited by air resistance and physiological limits. We enforce a strict speed capacity, clipping the magnitude of the velocity vector between $v_{min} = 0.5$ and $v_{max} = 10.0$ to prevent infinite acceleration while preserving fluid momentum.
+
+4.  **Constant Position Update:** Finally, positions are updated natively via $\vec{x}_{t+1} = \vec{x}_t + \vec{v}_{t+1} \Delta t$. By stripping away unnatural static velocity assignments, agents must learn to regulate their own speed inline with their turning radii and survival needs.
 
 ### The Predator Mechanics: Co-Evolution and Visual Obfuscation
 To introduce realistic, dynamic survival pressure without generating exploitable mathematical thresholds, we transitioned the environment to a **Multi-Agent Competitive Co-Evolution** framework. The Predators are not governed by static rules; they are independent Reinforcement Learning agents trained simultaneously against the Starlings in a zero-sum Markov Game.
@@ -73,7 +73,7 @@ To make decisions, each starling $i$ processes a strictly localized 18-dimension
 ### Addressing the POMDP: Temporal Context via Frame Stacking
 A strictly instantaneous 18D observation vector inherently strips away all spatial history, inadvertently creating a Partially Observable Markov Decision Process (POMDP). Without historical context, the agent cannot intrinsically perceive the *derivatives* of motion—namely the predator's acceleration and shifting execution (jerk). To differentiate between a predator actively accelerating into a dive versus one bleeding off residual speed from an aborted maneuver, we integrated **Frame Stacking** ($k=3$).
 
-By providing the network with a sliding geometric window of the most recent observation vectors, the feedforward Multi-Layer Perceptron (MLP) within the MAPPO architecture can natively compute finite-difference approximations of acceleration and optical flow, dodging the computational and memory burdens introduced by recurrent topologies (LSTM/GRU).
+By providing the network with a sliding temporal window of the most recent observation vectors, the feedforward Multi-Layer Perceptron (MLP) within the MAPPO architecture can natively compute finite-difference approximations of acceleration and optical flow, dodging the computational and memory burdens introduced by recurrent topologies (LSTM/GRU).
 
 ### Reward Function: Potential-Based Reward Shaping (PBRS)
 The core philosophy of our approach is that **flocking is not explicitly rewarded**. However, initial experiments revealed a pathological "fear of the edge" where massive terminal penalties for boundary violations paralyzed exploration. To mathematically eliminate this without corrupting the optimal survival policy, we utilize **Potential-Based Reward Shaping (PBRS)**.
@@ -88,7 +88,7 @@ The reward scheme now utilizes dense spatial potentials:
 
 ### Neural Architecture: MAPPO
 We utilize Multi-Agent Proximal Policy Optimization (MAPPO), an actor-critic algorithm highly suited for multi-agent swarm environments.
-*   **Shared Actor Network:** A multi-layer perceptron (two hidden layers of 64 units with Tanh activations) processes the 18D local observation space to output a probability distribution over the continuous 3D action space. By sharing the actor network weights, all agents learn a unified, symmetrical behavioral policy.
+*   **Shared Actor Network:** A multi-layer perceptron (three hidden layers of 64 units with Tanh activations) processes the stacked 54D input (18D observation × 3 frames) to output a probability distribution over the continuous 3D action space. By sharing the actor network weights, all agents learn a unified, symmetrical behavioral policy.
 *   **Centralized Critic (Mean-Field MAPPO):** To resolve the massive credit assignment problem in dense swarms while avoiding the Curse of Dimensionality (POMAC), our Critic network (256 hidden units) utilizes a Mean-Field approximation. Rather than processing an explicitly concatenated global state vector of every entity—which mathematically explodes as the swarm grows—the critic evaluates the focal agent's local observation concatenated with the continuous statistical mean state of the living swarm and predators. During simulation (inference), the Critic is discarded, and agents act purely on decentralized local perception.
 
 ## Results
@@ -97,7 +97,7 @@ Below is an early visualization of our 3D Starling and Falcon simulation environ
 
 ![Murmuration RL Simulation](assets/murmuration_rl.gif)
 
-*Placeholder for extended Results and Visualizations. As robust simulation models progress, we will document whether cohesive murmurations mathematically emerge as the optimal policy to defeat the Falcon state machine, or if the agents evolve unexpected alternative survival paradigms.*
+*Placeholder for extended Results and Visualizations. As robust simulation models progress, we will document whether cohesive murmurations mathematically emerge as the optimal policy to defeat the Falcon adversaries, or if the agents evolve unexpected alternative survival paradigms.*
 
 ## Conclusion
 By bridging biological imperatives with deep reinforcement learning, our environment establishes a rigorous testbed for exploring evolutionary survival tactics. While traditional Boids prove that local rules *can* create flocking, our simulation will reveal whether local rules *must* create flocking under threat. If driven solely by the desire to survive predatory attacks, we hypothesize that these artificial agents will organically discover that numerical and geographic unity is strength.
