@@ -435,4 +435,12 @@ class VectorMurmurationEnv:
 
         rewards_preds = torch.zeros(self.num_predators, device=self.device)
 
+        # Catch reward: +10.0 per boid caught this step
+        if new_deaths.any():
+            dist_pred_boid = torch.cdist(pred_pos, pos)  # (P, N)
+            catch_matrix = dist_pred_boid < self.physics.predator_catch_radius  # (P, N)
+            # Only count newly dead boids (not already-dead ones)
+            catches_per_pred = (catch_matrix & new_deaths.unsqueeze(0)).float().sum(dim=1)  # (P,)
+            rewards_preds += 10.0 * catches_per_pred
+
         return rewards, rewards_preds, new_deaths, new_potential, pred_phi_bounds

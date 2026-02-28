@@ -718,6 +718,69 @@ class TestRewards:
         # This is a sanity check — main verification is in the full potential test
         assert env.last_potential is not None
 
+    def test_predator_catch_reward(self):
+        """Predator must receive +10 reward per boid caught."""
+        env = self._setup(n=5, p=2)
+        env.reset()
+
+        # Place boid 0 on top of predator 0 to force a catch
+        env.physics.positions[0] = env.physics.predator_position[0].clone()
+        # All other boids far from all predators
+        for i in [1, 2, 3, 4]:
+            env.physics.positions[i] = torch.tensor([50.0, 50.0, 50.0])
+
+        # Move predator 1 far away so only predator 0 catches
+        env.physics.predator_position[1] = torch.tensor([99.0, 99.0, 99.0])
+
+        # Simulate the capture: physics._check_captures sets alive_mask
+        env.physics.alive_mask[0] = False
+
+        _, rewards_preds, _, _, _ = env._get_rewards()
+
+        assert rewards_preds[0].item() > 0, \
+            f"Predator 0 caught a boid but got reward {rewards_preds[0].item()} (should be +10)"
+        assert abs(rewards_preds[0].item() - 10.0) < ATOL, \
+            f"Expected +10.0 catch reward, got {rewards_preds[0].item()}"
+
+    def test_predator_no_catch_no_reward(self):
+        """Predator gets zero base reward when no boid is caught."""
+        env = self._setup(n=5, p=2)
+        env.reset()
+
+        # Place all boids far from all predators
+        for i in range(5):
+            env.physics.positions[i] = torch.tensor([50.0, 50.0, 50.0 + i * 5])
+        env.physics.predator_position[0] = torch.tensor([10.0, 10.0, 10.0])
+        env.physics.predator_position[1] = torch.tensor([90.0, 90.0, 90.0])
+
+        _, rewards_preds, _, _, _ = env._get_rewards()
+
+        assert abs(rewards_preds[0].item()) < ATOL, \
+            f"Predator 0 shouldn't have reward without catch, got {rewards_preds[0].item()}"
+        assert abs(rewards_preds[1].item()) < ATOL, \
+            f"Predator 1 shouldn't have reward without catch, got {rewards_preds[1].item()}"
+
+    def test_predator_only_catcher_rewarded(self):
+        """Only the predator that caught the boid should get the reward."""
+        env = self._setup(n=5, p=2)
+        env.reset()
+
+        # Predator 0 catches boid 0, predator 1 is far away
+        env.physics.positions[0] = env.physics.predator_position[0].clone()
+        env.physics.predator_position[1] = torch.tensor([99.0, 99.0, 99.0])
+        # Other boids far from everyone
+        for i in [1, 2, 3, 4]:
+            env.physics.positions[i] = torch.tensor([50.0, 50.0, 50.0 + i * 5])
+
+        # Simulate the capture
+        env.physics.alive_mask[0] = False
+
+        _, rewards_preds, _, _, _ = env._get_rewards()
+
+        assert rewards_preds[0].item() > 0, "Catching predator should be rewarded"
+        assert abs(rewards_preds[1].item()) < ATOL, \
+            f"Non-catching predator should get 0, got {rewards_preds[1].item()}"
+
 
 # ══════════════════════════════════════════════════════════════════════
 #  MEAN-FIELD GLOBAL STATE TESTS
