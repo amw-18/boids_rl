@@ -28,7 +28,7 @@ def main():
         "max_force": 2.0,
         
         "rollout_steps": 500,        # Timesteps collected before PPO update
-        "num_epochs": 15000,          # Total iterations
+        "num_epochs": 30000,          # Total iterations
         
         "actor_lr": 3e-4,
         "critic_lr": 1e-3,
@@ -225,8 +225,8 @@ def main():
                 print(f"Warning: WandB log failed at epoch {epoch} ({e})")
         
         if epoch % 50 == 0 or epoch == start_epoch:
-            b_ret, b_ent, b_vloss, b_ploss, _ = metrics["boids"]
-            p_ret, p_ent, p_vloss, p_ploss, _ = metrics["preds"]
+            b_ploss, b_vloss, b_ent, b_ret, _ = metrics["boids"]
+            p_ploss, p_vloss, p_ent, p_ret, _ = metrics["preds"]
             print(f"Epoch {epoch:04d} | Cohort: {actual_social_neighbors:>4.1f} | EvasionDist: {actual_predator_dist:>5.1f}m")
             print(f"  [BOIDS] Ret: {b_ret:>7.4f} | Ent: {b_ent:>6.4f} | VLoss: {b_vloss:>7.4f} | Ploss: {b_ploss:>7.4f}")
             print(f"  [PREDS] Ret: {p_ret:>7.4f} | Ent: {p_ent:>6.4f} | VLoss: {p_vloss:>7.4f} | Ploss: {p_ploss:>7.4f}")

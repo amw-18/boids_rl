@@ -34,7 +34,7 @@ class BoidsPhysics:
         self.predator_base_speed = base_speed
         self.predator_sprint_speed = base_speed * 1.5 
         self.predator_turn_angle = max_turn_angle * 1.5
-        self.predator_catch_radius = 2.0
+        self.predator_catch_radius = 0.5
         
         # Co-Evolution Parameters: Stamina Economy
         self.predator_max_stamina = 100.0 # total sprint capacity
@@ -80,9 +80,9 @@ class BoidsPhysics:
         # Initialize Predator State
         predator_pos = torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * self.space_size
         # Start predators randomly on the boundary
-        # axis = torch.randint(0, 3, (self.num_predators,))
-        # for i in range(self.num_predators):
-        #     predator_pos[i, axis[i]] = 0.0 if torch.rand(1).item() > 0.5 else self.space_size
+        axis = torch.randint(0, 3, (self.num_predators,))
+        for i in range(self.num_predators):
+            predator_pos[i, axis[i]] = 0.0 if torch.rand(1).item() > 0.5 else self.space_size
         self.predator_position = predator_pos
         
         pred_vel = (torch.rand((self.num_predators, 3), device=self.device, dtype=torch.float32) * 2 - 1)
