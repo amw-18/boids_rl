@@ -143,14 +143,14 @@ class TestPhysicsVelocity:
     """Verify thrust, speed clamping, and position updates."""
 
     def test_thrust_velocity_update(self):
-        """Thrust changes speed correctly: new_speed = speed + thrust * dt, clamped [0.5, 10]."""
+        """Thrust changes speed correctly: new_speed = speed + thrust * dt, clamped [min_speed, base_speed]."""
         phys = _small_physics(n=4)
 
         # Set known velocities: all flying along +X at base_speed
         phys.velocities = torch.tensor([
             [5.0, 0.0, 0.0],
             [5.0, 0.0, 0.0],
-            [0.5, 0.0, 0.0],  # at min speed
+            [phys.min_speed, 0.0, 0.0],  # at min speed
             [9.9, 0.0, 0.0],  # near max speed
         ])
         phys.up_vectors = torch.tensor([
@@ -165,18 +165,18 @@ class TestPhysicsVelocity:
         actions = torch.tensor([
             [ 1.0, 0.0, 0.0],  # full thrust forward
             [-1.0, 0.0, 0.0],  # full brake
-            [-1.0, 0.0, 0.0],  # brake at min speed → should stay at 0.5
-            [ 1.0, 0.0, 0.0],  # thrust near max → should clamp to 10.0
+            [-1.0, 0.0, 0.0],  # brake at min speed → should stay at min_speed
+            [ 1.0, 0.0, 0.0],  # thrust near max → should clamp to base_speed
         ])
 
         phys.step(boid_actions=actions)
 
         expected_speeds = []
         for i in range(4):
-            old_speed = torch.tensor([5.0, 5.0, 0.5, 9.9])[i].item()
+            old_speed = torch.tensor([5.0, 5.0, phys.min_speed, 9.9])[i].item()
             thrust = actions[i, 0].item() * phys.max_force
             new_speed = old_speed + thrust * phys.dt
-            new_speed = max(0.5, min(phys.base_speed, new_speed))
+            new_speed = max(phys.min_speed, min(phys.base_speed, new_speed))
             expected_speeds.append(new_speed)
 
         actual_speeds = phys.velocities.norm(dim=-1)
@@ -225,7 +225,7 @@ class TestPhysicsVelocity:
         assert not torch.allclose(phys.positions[0], pos_before[0], atol=ATOL)
 
     def test_alive_boids_never_zero_speed(self):
-        """Alive boids must always have speed >= 0.5 (min clamp)."""
+        """Alive boids must always have speed >= min_speed."""
         phys = _small_physics(n=10)
         # Apply max braking for many steps
         brake_action = torch.tensor([[-1.0, 0.0, 0.0]]).expand(10, 3)
@@ -233,7 +233,7 @@ class TestPhysicsVelocity:
             phys.step(boid_actions=brake_action.clone())
 
         alive_speeds = phys.velocities[phys.alive_mask].norm(dim=-1)
-        assert (alive_speeds >= 0.5 - ATOL).all(), \
+        assert (alive_speeds >= phys.min_speed - ATOL).all(), \
             f"Some alive boids below min speed: {alive_speeds}"
 
 
@@ -742,8 +742,8 @@ class TestRewards:
         assert abs(rewards_preds[0].item() - 10.0) < ATOL, \
             f"Expected +10.0 catch reward, got {rewards_preds[0].item()}"
 
-    def test_predator_no_catch_no_reward(self):
-        """Predator gets zero base reward when no boid is caught."""
+    def test_predator_no_catch_hunger_penalty(self):
+        """Predator gets constant -0.05 reward when no boid is caught."""
         env = self._setup(n=5, p=2)
         env.reset()
 
@@ -755,10 +755,10 @@ class TestRewards:
 
         _, rewards_preds, _, _, _ = env._get_rewards()
 
-        assert abs(rewards_preds[0].item()) < ATOL, \
-            f"Predator 0 shouldn't have reward without catch, got {rewards_preds[0].item()}"
-        assert abs(rewards_preds[1].item()) < ATOL, \
-            f"Predator 1 shouldn't have reward without catch, got {rewards_preds[1].item()}"
+        assert abs(rewards_preds[0].item() - (-0.05)) < ATOL, \
+            f"Predator 0 should have -0.05 hunger penalty, got {rewards_preds[0].item()}"
+        assert abs(rewards_preds[1].item() - (-0.05)) < ATOL, \
+            f"Predator 1 should have -0.05 hunger penalty, got {rewards_preds[1].item()}"
 
     def test_predator_only_catcher_rewarded(self):
         """Only the predator that caught the boid should get the reward."""
@@ -778,8 +778,8 @@ class TestRewards:
         _, rewards_preds, _, _, _ = env._get_rewards()
 
         assert rewards_preds[0].item() > 0, "Catching predator should be rewarded"
-        assert abs(rewards_preds[1].item()) < ATOL, \
-            f"Non-catching predator should get 0, got {rewards_preds[1].item()}"
+        assert abs(rewards_preds[1].item() - (-0.05)) < ATOL, \
+            f"Non-catching predator should get -0.05, got {rewards_preds[1].item()}"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -795,84 +795,84 @@ class TestGlobalState:
         obs_boids, _ = env.reset()
         return env, obs_boids
 
-    def test_global_state_mean_field(self):
-        """Naive mean-field: mean_pos, mean_vel, mean_up (alive), pred state, alive_ratio."""
-        env, obs = self._setup()
+    def test_global_state_k_nearest(self):
+        """Naive K-nearest global state computation."""
+        env, obs = self._setup(n=12) # Use 12 to test K=10 clamping
         N = env.n_agents
         P = env.num_predators
 
         global_state = env.get_global_state(obs)
+        K = min(10, N)
 
-        # --- Naive computation ---
-        alive = env.physics.alive_mask.float()
-        num_alive = alive.sum().clamp(min=1.0)
-
-        mean_pos = (env.physics.positions * alive.unsqueeze(1)).sum(dim=0) / num_alive / env.space_size
-        mean_vel = (env.physics.velocities * alive.unsqueeze(1)).sum(dim=0) / num_alive / env.physics.base_speed
-        mean_up = (env.physics.up_vectors * alive.unsqueeze(1)).sum(dim=0) / num_alive
-
-        pred_pos = env.physics.predator_position.flatten() / env.space_size
-        pred_vel = env.physics.predator_velocity.flatten() / env.physics.predator_sprint_speed
-        alive_ratio = (num_alive / N).unsqueeze(0)
-
-        expected_mf = torch.cat([mean_pos, mean_vel, mean_up, pred_pos, pred_vel, alive_ratio])
-
-        # Global state = [local_obs | mean_field], expanded for batch
-        assert global_state.shape == (N, obs.shape[1] + expected_mf.shape[0])
-
-        # Mean-field portion (after local obs) should be identical across all agents
-        mf_actual = global_state[0, obs.shape[1]:]
-        assert torch.allclose(mf_actual, expected_mf, atol=ATOL), \
-            f"Mean-field mismatch:\n  actual={mf_actual}\n  expected={expected_mf}"
-
-        # All agents should see the same mean field
-        for i in range(1, N):
-            assert torch.allclose(global_state[i, obs.shape[1]:], mf_actual, atol=ATOL), \
-                f"Agent {i} has different mean-field from agent 0"
-
-        # Each agent's local obs should match
-        for i in range(N):
-            assert torch.allclose(global_state[i, :obs.shape[1]], obs[i], atol=ATOL)
+        # Naive computation for agent 0
+        pos = env.physics.positions
+        vel = env.physics.velocities
+        alive = env.physics.alive_mask
+        
+        focal_pos = pos[0]
+        
+        # Calculate distances to all agents
+        dists = []
+        for j in range(N):
+            if not alive[j] or j == 0:
+                dists.append((float('inf'), j))
+            else:
+                dists.append(((pos[j] - focal_pos).norm().item(), j))
+                
+        dists.sort()
+        nearest_indices = [idx for d, idx in dists[:K]]
+        
+        expected_k_features = []
+        for idx in nearest_indices:
+            rel_pos = (pos[idx] - focal_pos) / (env.space_size / 2.0)
+            rel_vel = vel[idx] / env.physics.base_speed
+            is_alive = float(alive[idx])
+            expected_k_features.extend(rel_pos.tolist())
+            expected_k_features.extend(rel_vel.tolist())
+            expected_k_features.append(is_alive)
+            
+        expected_k_tensor = torch.tensor(expected_k_features, dtype=torch.float32)
+        
+        pred_pos = env.physics.predator_position
+        pred_vel = env.physics.predator_velocity
+        expected_pred_features = []
+        for p in range(P):
+            rel_pred_pos = (pred_pos[p] - focal_pos) / (env.space_size / 2.0)
+            rel_pred_vel = pred_vel[p] / env.physics.predator_sprint_speed
+            expected_pred_features.extend(rel_pred_pos.tolist())
+            expected_pred_features.extend(rel_pred_vel.tolist())
+            
+        expected_pred_tensor = torch.tensor(expected_pred_features, dtype=torch.float32)
+        
+        # Combine
+        expected_global_0 = torch.cat([obs[0], expected_k_tensor, expected_pred_tensor])
+        
+        actual_global_0 = global_state[0]
+        assert torch.allclose(actual_global_0, expected_global_0, atol=ATOL), \
+            f"Global state mismatch for agent 0"
 
     def test_global_state_with_deaths(self):
-        """Dead agents must be excluded from mean-field means."""
-        env, obs = self._setup(n=6)
-
-        # Kill agents 2 and 4
-        env.physics.alive_mask[2] = False
-        env.physics.alive_mask[4] = False
-        env.physics.velocities[2] = 0.0
-        env.physics.velocities[4] = 0.0
-
+        """Dead agents should be pushed to the end of K-nearest."""
+        env, obs = self._setup(n=12)
+        
+        # Kill all but 3 agents (agents 0, 1, 2 alive)
+        for i in range(3, 12):
+            env.physics.alive_mask[i] = False
+            
         obs = env._get_observations()
         global_state = env.get_global_state(obs)
-
-        # Naive: only alive agents (0, 1, 3, 5)
-        alive_indices = [0, 1, 3, 5]
-        num_alive = len(alive_indices)
-
-        alive_pos = env.physics.positions[alive_indices]
-        alive_vel = env.physics.velocities[alive_indices]
-        alive_up = env.physics.up_vectors[alive_indices]
-
-        mean_pos = alive_pos.sum(dim=0) / num_alive / env.space_size
-        mean_vel = alive_vel.sum(dim=0) / num_alive / env.physics.base_speed
-        mean_up = alive_up.sum(dim=0) / num_alive
-
-        # Extract mean field from global state
-        mf = global_state[0, obs.shape[1]:]
-
-        # First 3 values should be mean_pos
-        assert torch.allclose(mf[0:3], mean_pos, atol=ATOL), \
-            f"mean_pos with deaths: actual={mf[0:3]}, expected={mean_pos}"
-        assert torch.allclose(mf[3:6], mean_vel, atol=ATOL), \
-            f"mean_vel with deaths: actual={mf[3:6]}, expected={mean_vel}"
-
-        # alive_ratio should be 4/6
-        expected_ratio = 4.0 / 6.0
-        actual_ratio = mf[-1].item()
-        assert abs(actual_ratio - expected_ratio) < ATOL, \
-            f"alive_ratio: actual={actual_ratio}, expected={expected_ratio}"
+        
+        # Agent 0 state
+        state_0 = global_state[0]
+        # features for K=10 neighbors start after local obs (18)
+        k_features = state_0[18:18 + 10 * 7]
+        
+        # Verify alive flags in the neighbor block
+        alive_flags = k_features[6::7]
+        
+        assert alive_flags[0].item() == 1.0 # 1st nearest (agent 1 or 2)
+        assert alive_flags[1].item() == 1.0 # 2nd nearest
+        assert (alive_flags[2:] == 0.0).all(), "Remaining neighbors should be dead"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -930,7 +930,7 @@ class TestMultiStepIntegration:
             alive = env.physics.alive_mask
             if alive.any():
                 speeds = env.physics.velocities[alive].norm(dim=-1)
-                assert (speeds >= 0.5 - ATOL).all(), \
+                assert (speeds >= env.physics.min_speed - ATOL).all(), \
                     f"Step {step}: alive boid below min speed: {speeds.min()}"
                 assert (speeds <= 10.0 + ATOL).all(), \
                     f"Step {step}: alive boid above max speed: {speeds.max()}"

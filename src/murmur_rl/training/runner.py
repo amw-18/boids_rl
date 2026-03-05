@@ -41,7 +41,7 @@ def main():
         "update_epochs": 4,          # PPO passes over the rollout buffer
         "batch_size": 1024,          # Large batch for stable gradient
         
-        "stacked_frames": 3,         # POMDP History context
+        "stacked_frames": 4,         # POMDP History context (minimum 4 to capture jerk)
     }
 
     # Initialize standard Weights and Biases project
@@ -50,7 +50,7 @@ def main():
         try:
             wandb.init(
                 project="murmur_rl",
-                name="co-evolution run",
+                name="co-evolution run 2",
                 config=config,
                 mode="online"
             )
@@ -91,7 +91,7 @@ def main():
         obs_dim=boid_obs_dim, 
         global_obs_dim=boid_global_obs_dim, 
         action_dim=3, 
-        hidden_size=64, 
+        hidden_size=128, 
         stacked_frames=config["stacked_frames"]
     )
     
@@ -101,7 +101,7 @@ def main():
         obs_dim=pred_obs_dim,
         global_obs_dim=pred_global_obs_dim,
         action_dim=3,
-        hidden_size=128,
+        hidden_size=256,
         stacked_frames=config["stacked_frames"]
     )
     

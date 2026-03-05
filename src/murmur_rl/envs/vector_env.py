@@ -50,13 +50,13 @@ class VectorMurmurationEnv:
 
         self.obs_dim = 18
         
-        # Centralized Critic Global State Dimension: (Mean-Field Approximation)
-        # Focal Agent Local Obs (self.obs_dim) + Swarm Mean Pos/Vel/Up (9) + Predator Pos/Vel (P*6) + Alive Ratio (1)
-        # = obs_dim + 10 + num_predators * 6
-        self.global_obs_dim = self.obs_dim + 10 + (num_predators * 6)
+        K = min(10, self.n_agents)
+        self.global_obs_dim = self.obs_dim + (K * 7) + (num_predators * 6)
+        self.pred_global_obs_dim = 45 + (K * 7) + (num_predators * 6)
         
         self.action_dim = 3
         self.num_moves = 0
+        self.env_step_counter = 0
         self.max_steps = 500
 
         # Pre-compute constants as on-device tensors so compiled code
@@ -132,6 +132,12 @@ class VectorMurmurationEnv:
         # Step physics using Thrust, Roll, Pitch actions [-1, 1]
         self.physics.step(boid_actions=boid_actions, predator_actions=predator_actions)
         self.num_moves += 1
+        
+        # Curriculum: Anneal predator catch radius from 2.0 to 0.5 over 5M steps
+        self.env_step_counter += 1
+        decay_steps = 5000000.0
+        progress = min(1.0, self.env_step_counter / decay_steps)
+        self.physics.predator_catch_radius = 2.0 - progress * 1.5
 
         obs_boids = self._get_observations()
         obs_preds = self._get_predator_observations()
@@ -202,8 +208,9 @@ class VectorMurmurationEnv:
 
         # Zero out alignment/com for agents with no neighbours
         has_neighbors = in_radius.any(dim=1, keepdim=True)      # (N, 1)
-        local_alignment = local_alignment * has_neighbors.float()
-        com_direction = com_direction * has_neighbors.float()
+        is_active = has_neighbors & alive.unsqueeze(1)
+        local_alignment = local_alignment * is_active.float()
+        com_direction = com_direction * is_active.float()
 
         # === Perceptual Threat (Predator) ===
         pred_pos = self.physics.predator_position               # (num_predators, 3)
@@ -336,35 +343,61 @@ class VectorMurmurationEnv:
         
     def get_global_state(self, local_obs):
         """
-        Returns the global state tensor for the Centralized Critic using Mean-Field approximation.
-        Shape: (N, global_obs_dim)
-        Combines the focal agent's local observation with the mean state of the alive swarm.
-        This provides perfect global omniscience without the curse of dimensionality.
+        Returns the global state tensor for the Centralized Critic using K-Nearest approximation.
+        Combines the focal agent's local observation with the exact relative states 
+        of its K-nearest neighbors and all predators.
         """
-        # 1. Calculate the Mean Field of the Swarm (only considering alive birds)
-        alive = self.physics.alive_mask.float().unsqueeze(1) # (N, 1)
-        num_alive = alive.sum().clamp(min=1.0) # Prevent divide by zero
-        
-        mean_pos = (self.physics.positions * alive).sum(dim=0) / num_alive / self.space_size
-        mean_vel = (self.physics.velocities * alive).sum(dim=0) / num_alive / self.physics.base_speed
-        mean_up = (self.physics.up_vectors * alive).sum(dim=0) / num_alive 
-        
-        alive_ratio = (num_alive / self.n_agents).unsqueeze(0) # (1,)
-        
-        # 2. Flatten Predator State
-        pred_pos = self.physics.predator_position.flatten() / self.space_size
-        pred_vel = self.physics.predator_velocity.flatten() / self.physics.predator_sprint_speed
-        
-        # 3. Concatenate Mean Field
-        mean_field_state = torch.cat([mean_pos, mean_vel, mean_up, pred_pos, pred_vel, alive_ratio], dim=0) # (10 + P*6,)
-        
-        # 4. Expand Mean Field to match batch size N or P
         batch_size = local_obs.shape[0]
-        expanded_mean_field = mean_field_state.unsqueeze(0).expand(batch_size, -1)
+        is_boid = (batch_size == self.n_agents)
         
-        # 5. Concatenate with Focal Local Observations
-        global_state = torch.cat([local_obs, expanded_mean_field], dim=1)
+        pos = self.physics.positions # (N, 3)
+        vel = self.physics.velocities # (N, 3)
+        alive = self.physics.alive_mask # (N,)
         
+        if is_boid:
+            focal_pos = pos
+        else:
+            focal_pos = self.physics.predator_position
+            
+        K = min(10, self.n_agents)
+        dist_matrix = torch.cdist(focal_pos, pos) # (batch_size, N)
+        dist_matrix = torch.where(alive.unsqueeze(0), dist_matrix, self._inf)
+        
+        if is_boid:
+            # Mask out self
+            dist_matrix = torch.where(self._diag_mask, self._inf, dist_matrix)
+            
+        _, closest_idx = torch.topk(dist_matrix, k=K, dim=1, largest=False) # (batch_size, K)
+        
+        # Gather K features
+        k_pos = pos[closest_idx] # (batch_size, K, 3)
+        k_vel = vel[closest_idx] # (batch_size, K, 3)
+        
+        # We must mask out the focal agent's alive flag if it gets pulled into the 
+        # padding slots due to a small swarm size.
+        k_alive = alive[closest_idx].float() # (batch_size, K)
+        if is_boid:
+            focal_idx = torch.arange(batch_size, device=self.device).unsqueeze(1)
+            k_alive = torch.where(closest_idx == focal_idx, 0.0, k_alive)
+        k_alive = k_alive.unsqueeze(-1) # (batch_size, K, 1)
+        
+        rel_pos = (k_pos - focal_pos.unsqueeze(1)) / self._half_space
+        rel_vel = k_vel / self.physics.base_speed
+        
+        k_features = torch.cat([rel_pos, rel_vel, k_alive], dim=-1) # (batch_size, K, 7)
+        k_features_flat = k_features.view(batch_size, -1) # (batch_size, K * 7)
+        
+        # Predator features
+        pred_pos = self.physics.predator_position # (P, 3)
+        pred_vel = self.physics.predator_velocity # (P, 3)
+        
+        rel_pred_pos = (pred_pos.unsqueeze(0) - focal_pos.unsqueeze(1)) / self._half_space # (batch_size, P, 3)
+        rel_pred_vel = pred_vel.unsqueeze(0).expand(batch_size, -1, -1) / self.physics.predator_sprint_speed # (batch_size, P, 3)
+        
+        pred_features = torch.cat([rel_pred_pos, rel_pred_vel], dim=-1) # (batch_size, P, 6)
+        pred_features_flat = pred_features.view(batch_size, -1) # (batch_size, P * 6)
+        
+        global_state = torch.cat([local_obs, k_features_flat, pred_features_flat], dim=1)
         return global_state
 
     # ------------------------------------------------------------------
@@ -446,14 +479,14 @@ class VectorMurmurationEnv:
             catches_per_pred = (catch_matrix & new_deaths.unsqueeze(0)).float().sum(dim=1)  # (P,)
             rewards_preds += 10.0 * catches_per_pred
 
-        # Hunger penalty: scaled by timesteps since last cooldown end
+        # Hunger penalty: constant penalty per step to encourage quick catches
         is_cooldown = self.physics.predator_cooldown > 0
         made_catch = catches_per_pred > 0
-        hunger_penalty = -0.01 * self.physics.predator_time_since_cooldown.float()
+        hunger_penalty = -0.05
         
         rewards_preds += torch.where(
             ~is_cooldown & ~made_catch,
-            hunger_penalty,
+            torch.tensor(hunger_penalty, device=self.device),
             self._zero
         )
 

@@ -8,7 +8,7 @@ class StarlingBrain(nn.Module):
     - All starlings share the Actor network (processing local observations).
     - The Centralized Critic processes the global state to solve credit assignment.
     """
-    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 3, hidden_size: int = 64, critic_hidden_size: int = 256, stacked_frames: int = 3):
+    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 3, hidden_size: int = 128, critic_hidden_size: int = 512, stacked_frames: int = 4):
         super().__init__()
         
         # Actor: Shared feature extractor for local observation
@@ -75,7 +75,7 @@ class FalconBrain(nn.Module):
     - Operates on the 45D Visual Obfuscation observation space.
     - Decoupled from the Starling weights for zero-sum Co-Evolution.
     """
-    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 3, hidden_size: int = 128, critic_hidden_size: int = 256, stacked_frames: int = 3):
+    def __init__(self, obs_dim: int, global_obs_dim: int, action_dim: int = 3, hidden_size: int = 256, critic_hidden_size: int = 512, stacked_frames: int = 4):
         super().__init__()
         
         # Actor: Slightly deeper/wider to process the obfuscated noise

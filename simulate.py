@@ -29,7 +29,7 @@ class RLVision3D:
             # Load checkpoint directly to find the expected Critic dimensions
             boid_checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
             
-            stacked_frames = 3  # Must match training config
+            stacked_frames = 4  # Must match training config
             if 'critic.0.weight' in boid_checkpoint:
                 # Critic is built as Linear(global_obs_dim * stacked_frames, ...) so divide back out
                 expected_global_obs_dim = boid_checkpoint['critic.0.weight'].shape[1] // stacked_frames
@@ -37,7 +37,7 @@ class RLVision3D:
                 expected_global_obs_dim = self.env.global_obs_dim
         else:
             expected_global_obs_dim = self.env.global_obs_dim
-            stacked_frames = 3
+            stacked_frames = 4
             
         # Initialize RL Brains
         self.stacked_frames = stacked_frames
@@ -45,7 +45,7 @@ class RLVision3D:
             obs_dim=18, 
             global_obs_dim=expected_global_obs_dim, 
             action_dim=3, 
-            hidden_size=64,
+            hidden_size=128,
             stacked_frames=self.stacked_frames
         ).to(self.device)
         
@@ -65,7 +65,7 @@ class RLVision3D:
             obs_dim=45,
             global_obs_dim=pred_global_obs_dim,
             action_dim=3,
-            hidden_size=128,
+            hidden_size=256,
             stacked_frames=self.stacked_frames
         ).to(self.device)
         

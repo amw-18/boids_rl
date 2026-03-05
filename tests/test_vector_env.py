@@ -166,21 +166,12 @@ def test_global_state():
     
     global_state = env.get_global_state(obs)
     
-    # Expected dimensions
-    # N * 3 (pos) + N * 3 (vel) + N * 3 (up) + P * 3 (pred_pos) + P * 3 (pred_vel) + N (alive)
-    expected_dim = (N * 3) + (N * 3) + (N * 3) + (env.num_predators * 3) + (env.num_predators * 3) + N
+    # Expected dimensions for K-Nearest Boid Global State
+    K = min(10, N)
+    expected_dim = env.obs_dim + (K * 7) + (env.num_predators * 6)
     
-    # Frame stacking integration means global state might be flattened across history
-    # The true single-frame dimension is:
-    expected_dim = env.global_obs_dim  # The environment dynamically computes this
-    
-    # It must expand identically across the N agents
-    assert global_state.shape == (N, expected_dim), f"Expected shape {(N, expected_dim)}, got {global_state.shape}"
-    
-    # Verify that the mean-field part of the global state is identical across all agents
-    # The first `env.obs_dim` elements are the focal agent's local observation, which differ.
-    assert torch.allclose(global_state[0, env.obs_dim:], global_state[1, env.obs_dim:]), "Mean field part of global state must be identical across all agents"
     assert env.global_obs_dim == expected_dim, "Internal environment tracker must match expected dimensions."
+    assert global_state.shape == (N, expected_dim), f"Expected shape {(N, expected_dim)}, got {global_state.shape}"
     
     print("test_global_state: PASSED ✓")
 

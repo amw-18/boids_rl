@@ -59,7 +59,7 @@ class AlternatingCoevolutionTrainer:
         target_kl: float = 0.015,
         update_epochs: int = 4,
         batch_size: int = 64,
-        stacked_frames: int = 3
+        stacked_frames: int = 4
     ):
         self.env = env
         self.device = device

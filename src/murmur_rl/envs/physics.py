@@ -16,7 +16,8 @@ class BoidsPhysics:
         base_speed: float = 5.0,
         max_turn_angle: float = 0.5, # radians per timestep
         max_force: float = 2.0,
-        dt: float = 0.1
+        dt: float = 0.1,
+        min_speed: float = 2.5
     ):
         self.num_boids = num_boids
         self.num_predators = num_predators
@@ -29,12 +30,13 @@ class BoidsPhysics:
         self.max_turn_angle = max_turn_angle
         self.max_force = max_force
         self.dt = dt
+        self.min_speed = min_speed
         
         # Predator properties
         self.predator_base_speed = base_speed
         self.predator_sprint_speed = base_speed * 1.5 
         self.predator_turn_angle = max_turn_angle * 1.5
-        self.predator_catch_radius = 0.5
+        self.predator_catch_radius = 2.0  # Starts at 2.0, decays via curriculum in env
         
         # Co-Evolution Parameters: Stamina Economy
         self.predator_max_stamina = 100.0 # total sprint capacity
@@ -161,8 +163,8 @@ class BoidsPhysics:
         # 2. Velocity & Thrust
         new_speed = speed + thrust * self.dt
         
-        # Aerodynamic Limits: Cap speed between 0.5 and base_speed
-        new_speed = torch.clamp(new_speed, min=0.5, max=self.base_speed)
+        # Aerodynamic Limits: Cap speed between min_speed and base_speed
+        new_speed = torch.clamp(new_speed, min=self.min_speed, max=self.base_speed)
         
         self.velocities = forward_new * new_speed
         
