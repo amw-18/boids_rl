@@ -245,8 +245,8 @@ def main() -> None:
                 print(f"Saved Checkpoints: {boid_checkpoint_path} & {pred_checkpoint_path}")
 
             del boid_rollouts, pred_rollouts
-            gc.collect()
             if device_name == "mps":
+                gc.collect()
                 torch.mps.empty_cache()
 
         manifest["status"] = "completed"
