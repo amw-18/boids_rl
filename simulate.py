@@ -1,9 +1,16 @@
 import os
+import sys
+from pathlib import Path
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from mpl_toolkits.mplot3d import Axes3D
+
+REPO_ROOT = Path(__file__).resolve().parent
+SRC_PATH = REPO_ROOT / "src"
+if str(SRC_PATH) not in sys.path:
+    sys.path.insert(0, str(SRC_PATH))
 
 from murmur_rl.envs.vector_env import VectorMurmurationEnv
 from murmur_rl.agents.starling import StarlingBrain, FalconBrain

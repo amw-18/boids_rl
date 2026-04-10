@@ -1,0 +1,23 @@
+[experiment]
+id = "baseline-heuristic-boids-vs-random-predator"
+name = "Heuristic boids prey vs random predator"
+description = "Classical boids-style heuristic prey policy evaluated against a random predator."
+
+study_config = "../../studies/v1_shaped_current.toml"
+
+[evaluation]
+num_episodes = 3
+seeds = [0, 1, 2]
+
+[prey_policy]
+type = "heuristic_boids"
+deterministic = true
+label = "heuristic-boids"
+
+[predator_policy]
+type = "random"
+deterministic = true
+label = "random-predator"
+
+[output]
+subdir = "analysis"

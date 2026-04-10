@@ -1,0 +1,25 @@
+[experiment]
+id = "baseline-learned-prey-vs-learned-predator"
+name = "Learned prey vs learned predator"
+description = "Primary benchmark comparison. Supply both checkpoint paths before running."
+
+study_config = "../../studies/v1_shaped_current.toml"
+
+[evaluation]
+num_episodes = 3
+seeds = [0, 1, 2]
+
+[prey_policy]
+type = "checkpoint"
+checkpoint = ""
+deterministic = true
+label = "learned-prey"
+
+[predator_policy]
+type = "checkpoint"
+checkpoint = ""
+deterministic = true
+label = "learned-predator"
+
+[output]
+subdir = "analysis"

@@ -1,0 +1,24 @@
+[experiment]
+id = "baseline-random-prey-vs-learned-predator"
+name = "Random prey vs learned predator"
+description = "Candidate benchmark baseline. Supply the predator checkpoint path before running."
+
+study_config = "../../studies/v1_shaped_current.toml"
+
+[evaluation]
+num_episodes = 3
+seeds = [0, 1, 2]
+
+[prey_policy]
+type = "random"
+deterministic = true
+label = "random-prey"
+
+[predator_policy]
+type = "checkpoint"
+checkpoint = ""
+deterministic = true
+label = "learned-predator"
+
+[output]
+subdir = "analysis"

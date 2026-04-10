@@ -32,10 +32,29 @@ class VectorMurmurationEnv:
         base_speed=5.0,
         max_turn_angle=0.5,
         max_force=2.0,
+        min_speed=2.5,
+        dt=0.1,
         device="cpu",
         gamma=0.99,
         pbrs_k=1.0,
         pbrs_c=1.0,
+        max_steps=500,
+        curriculum_enabled=True,
+        predator_catch_radius_start=2.0,
+        predator_catch_radius_end=0.5,
+        predator_catch_radius_decay_steps=5000000,
+        predator_visual_noise_variance=5.0,
+        predator_sprint_multiplier=1.5,
+        predator_turn_multiplier=1.5,
+        predator_cooldown_duration=50,
+        predator_max_stamina=100.0,
+        predator_sprint_drain=1.0,
+        predator_recovery_rate=0.5,
+        survival_reward=0.1,
+        collision_penalty=2.0,
+        death_penalty=-100.0,
+        predator_catch_reward=10.0,
+        predator_hunger_penalty=-0.05,
     ):
         self.n_agents = num_agents
         self.num_predators = num_predators
@@ -52,6 +71,15 @@ class VectorMurmurationEnv:
             base_speed=base_speed,
             max_turn_angle=max_turn_angle,
             max_force=max_force,
+            min_speed=min_speed,
+            dt=dt,
+            predator_sprint_multiplier=predator_sprint_multiplier,
+            predator_turn_multiplier=predator_turn_multiplier,
+            predator_catch_radius=predator_catch_radius_start,
+            predator_max_stamina=predator_max_stamina,
+            predator_sprint_drain=predator_sprint_drain,
+            predator_recovery_rate=predator_recovery_rate,
+            predator_cooldown_duration=predator_cooldown_duration,
         )
 
         self.obs_dim = 18
@@ -64,13 +92,26 @@ class VectorMurmurationEnv:
         self.action_dim = 3
         self.num_moves = 0
         self.env_step_counter = 0
-        self.max_steps = 500
+        self.max_steps = max_steps
+        self.curriculum_enabled = curriculum_enabled
+        self.predator_catch_radius_start = predator_catch_radius_start
+        self.predator_catch_radius_end = predator_catch_radius_end
+        self.predator_catch_radius_decay_steps = predator_catch_radius_decay_steps
+        self.predator_visual_noise_variance = predator_visual_noise_variance
+        self.survival_reward = survival_reward
+        self.collision_penalty = collision_penalty
+        self.predator_catch_reward = predator_catch_reward
+        self.predator_hunger_penalty = predator_hunger_penalty
 
         # Pre-compute constants as on-device tensors so compiled code
         # doesn't re-create them on every call
         self._perception_r = torch.tensor(perception_radius, device=self.device)
         self._half_space = torch.tensor(space_size / 2.0, device=self.device)
-        self._death_penalty = torch.tensor(-100.0, device=self.device)
+        self._death_penalty = torch.tensor(death_penalty, device=self.device)
+        self._survival_reward = torch.tensor(survival_reward, device=self.device)
+        self._collision_penalty = torch.tensor(collision_penalty, device=self.device)
+        self._predator_catch_reward = torch.tensor(predator_catch_reward, device=self.device)
+        self._predator_hunger_penalty = torch.tensor(predator_hunger_penalty, device=self.device)
         self._zero = torch.tensor(0.0, device=self.device)
         self._inf = torch.tensor(float("inf"), device=self.device)
 
@@ -88,6 +129,7 @@ class VectorMurmurationEnv:
             num_agents, dtype=torch.bool, device=self.device
         )
         self.predator_danger_radius = 15.0
+        self._apply_curriculum()
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,6 +161,7 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.physics.reset()
         self._dead_mask.zero_()
+        self._apply_curriculum()
         _, _, _, new_potential, new_pred_potential = self._get_rewards()
         self.last_potential = new_potential
         self.last_pred_potential = new_pred_potential
@@ -140,11 +183,8 @@ class VectorMurmurationEnv:
         self.physics.step(boid_actions=boid_actions, predator_actions=predator_actions)
         self.num_moves += 1
         
-        # Curriculum: Anneal predator catch radius from 2.0 to 0.5 over 5M steps
         self.env_step_counter += 1
-        decay_steps = 5000000.0
-        progress = min(1.0, self.env_step_counter / decay_steps)
-        self.physics.predator_catch_radius = 2.0 - progress * 1.5
+        self._apply_curriculum()
 
         obs_boids = self._get_observations()
         obs_preds = self._get_predator_observations()
@@ -220,42 +260,48 @@ class VectorMurmurationEnv:
         com_direction = com_direction * is_active.float()
 
         # === Perceptual Threat (Predator) ===
-        pred_pos = self.physics.predator_position               # (num_predators, 3)
-        pred_vel = self.physics.predator_velocity               # (num_predators, 3)
+        if self.num_predators > 0:
+            pred_pos = self.physics.predator_position               # (num_predators, 3)
+            pred_vel = self.physics.predator_velocity               # (num_predators, 3)
 
-        # Find closest predator for each boid
-        dist_to_preds = torch.cdist(pos, pred_pos)              # (N, num_predators)
-        closest_pred_idx = torch.argmin(dist_to_preds, dim=1)   # (N,)
-        
-        closest_pred_pos = pred_pos[closest_pred_idx]           # (N, 3)
-        closest_pred_vel = pred_vel[closest_pred_idx]           # (N, 3)
+            # Find closest predator for each boid
+            dist_to_preds = torch.cdist(pos, pred_pos)              # (N, num_predators)
+            closest_pred_idx = torch.argmin(dist_to_preds, dim=1)   # (N,)
+            
+            closest_pred_pos = pred_pos[closest_pred_idx]           # (N, 3)
+            closest_pred_vel = pred_vel[closest_pred_idx]           # (N, 3)
 
-        dx = closest_pred_pos - pos                             # (N, 3)
-        dv = closest_pred_vel - vel                             # (N, 3)
+            dx = closest_pred_pos - pos                             # (N, 3)
+            dv = closest_pred_vel - vel                             # (N, 3)
 
-        d = dx.norm(dim=-1, keepdim=True)                       # (N, 1)
-        d_norm = (d / (self.space_size / 2.0)).clamp(max=1.0)
+            d = dx.norm(dim=-1, keepdim=True)                       # (N, 1)
+            d_norm = (d / (self.space_size / 2.0)).clamp(max=1.0)
 
-        u = dx / d.clamp(min=1e-5)                              # (N, 3) unit dir
+            u = dx / d.clamp(min=1e-5)                              # (N, 3) unit dir
 
-        # Closing speed
-        max_v_close = self.physics.predator_sprint_speed + self.physics.base_speed
-        v_close = -(dv * u).sum(dim=-1, keepdim=True)           # (N, 1)
-        v_close_norm = (v_close / max_v_close).clamp(-1.0, 1.0)
+            # Closing speed
+            max_v_close = self.physics.predator_sprint_speed + self.physics.base_speed
+            v_close = -(dv * u).sum(dim=-1, keepdim=True)           # (N, 1)
+            v_close_norm = (v_close / max_v_close).clamp(-1.0, 1.0)
 
-        # Looming
-        loom = v_close / d.clamp(min=1e-5)
-        loom_norm = (loom / 5.0).clamp(-1.0, 1.0)
+            # Looming
+            loom = v_close / d.clamp(min=1e-5)
+            loom_norm = (loom / 5.0).clamp(-1.0, 1.0)
 
-        # Bearing
-        vel_unit = vel / vel.norm(dim=-1, keepdim=True).clamp(min=1e-5)
-        in_front = (vel_unit * u).sum(dim=-1, keepdim=True)     # (N, 1)
+            # Bearing
+            vel_unit = vel / vel.norm(dim=-1, keepdim=True).clamp(min=1e-5)
+            in_front = (vel_unit * u).sum(dim=-1, keepdim=True)     # (N, 1)
 
-        # Mask far threats
-        far = d > self._half_space
-        v_close_norm = torch.where(far, self._zero, v_close_norm)
-        loom_norm = torch.where(far, self._zero, loom_norm)
-        in_front = torch.where(far, self._zero, in_front)
+            # Mask far threats
+            far = d > self._half_space
+            v_close_norm = torch.where(far, self._zero, v_close_norm)
+            loom_norm = torch.where(far, self._zero, loom_norm)
+            in_front = torch.where(far, self._zero, in_front)
+        else:
+            d_norm = torch.zeros((self.n_agents, 1), device=self.device)
+            v_close_norm = torch.zeros((self.n_agents, 1), device=self.device)
+            loom_norm = torch.zeros((self.n_agents, 1), device=self.device)
+            in_front = torch.zeros((self.n_agents, 1), device=self.device)
 
         # === Boundary ===
         # 3D relative position from center [-1.0, 1.0]
@@ -330,8 +376,7 @@ class VectorMurmurationEnv:
 
             # Gaussian Noise explicitly scales with density.
             # Tuning param: a density of 1.0 (everyone) causes max_noise variance
-            max_noise_variance = 5.0 # units of spatial distortion
-            sigma = target_density * max_noise_variance
+            sigma = target_density * self.predator_visual_noise_variance
             noise = torch.randn_like(target_positions) * sigma
 
             obfuscated_target_pos = target_positions + noise
@@ -468,10 +513,10 @@ class VectorMurmurationEnv:
 
         # --- Compute rewards vectorised ---
         # Base survival reward
-        rewards = torch.full((self.n_agents,), 0.1, device=self.device)
+        rewards = torch.full((self.n_agents,), self._survival_reward.item(), device=self.device)
 
         # Collision penalty
-        rewards -= 2.0 * collision_count
+        rewards -= self._collision_penalty * collision_count
 
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)
@@ -492,17 +537,28 @@ class VectorMurmurationEnv:
 
         # Catch reward: +10.0 per boid caught this step
         catches_per_pred = self.physics.last_capture_counts
-        rewards_preds += 10.0 * catches_per_pred
+        rewards_preds += self._predator_catch_reward * catches_per_pred
 
         # Hunger penalty: constant penalty per step to encourage quick catches
         is_cooldown = self.physics.predator_cooldown > 0
         made_catch = catches_per_pred > 0
-        hunger_penalty = -0.05
-        
         rewards_preds += torch.where(
             ~is_cooldown & ~made_catch,
-            torch.tensor(hunger_penalty, device=self.device),
+            self._predator_hunger_penalty,
             self._zero
         )
 
         return rewards, rewards_preds, new_deaths, new_potential, pred_phi_bounds
+
+    def _apply_curriculum(self):
+        if self.num_predators == 0:
+            self.physics.predator_catch_radius = 0.0
+            return
+
+        if not self.curriculum_enabled or self.predator_catch_radius_decay_steps <= 0:
+            self.physics.predator_catch_radius = self.predator_catch_radius_start
+            return
+
+        progress = min(1.0, self.env_step_counter / float(self.predator_catch_radius_decay_steps))
+        radius_delta = self.predator_catch_radius_end - self.predator_catch_radius_start
+        self.physics.predator_catch_radius = self.predator_catch_radius_start + (radius_delta * progress)
