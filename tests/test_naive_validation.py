@@ -40,12 +40,9 @@ def _small_env(n=5, p=2, seed=42):
     torch.manual_seed(seed)
     env = VectorMurmurationEnv(num_agents=n, num_predators=p,
                                space_size=100.0, perception_radius=15.0,
-                               device="cpu", gamma=0.99, pbrs_k=1.0,
-                               pbrs_c=1.0)
-    # Override physics params to match training config
-    env.physics.base_speed = 5.0
-    env.physics.max_turn_angle = 0.5
-    env.physics.max_force = 2.0
+                               base_speed=5.0, max_turn_angle=0.5,
+                               max_force=2.0, device="cpu", gamma=0.99,
+                               pbrs_k=1.0, pbrs_c=1.0)
     return env
 
 
@@ -574,8 +571,8 @@ class TestRewards:
         """Newly killed agent gets -100, already-dead gets 0."""
         env = self._setup()
 
-        # Kill boid 0 via physics
-        env.physics.alive_mask[0] = False
+        env.physics.positions[0] = env.physics.predator_position[0].clone()
+        env.physics._check_captures()
         # Boid 0 is newly dead (not yet in _dead_mask)
         assert env._dead_mask[0] == False
 
@@ -732,8 +729,7 @@ class TestRewards:
         # Move predator 1 far away so only predator 0 catches
         env.physics.predator_position[1] = torch.tensor([99.0, 99.0, 99.0])
 
-        # Simulate the capture: physics._check_captures sets alive_mask
-        env.physics.alive_mask[0] = False
+        env.physics._check_captures()
 
         _, rewards_preds, _, _, _ = env._get_rewards()
 
@@ -772,8 +768,7 @@ class TestRewards:
         for i in [1, 2, 3, 4]:
             env.physics.positions[i] = torch.tensor([50.0, 50.0, 50.0 + i * 5])
 
-        # Simulate the capture
-        env.physics.alive_mask[0] = False
+        env.physics._check_captures()
 
         _, rewards_preds, _, _, _ = env._get_rewards()
 
@@ -801,7 +796,7 @@ class TestGlobalState:
         N = env.n_agents
         P = env.num_predators
 
-        global_state = env.get_global_state(obs)
+        global_state = env.get_boid_global_state(obs)
         K = min(10, N)
 
         # Naive computation for agent 0
@@ -860,7 +855,7 @@ class TestGlobalState:
             env.physics.alive_mask[i] = False
             
         obs = env._get_observations()
-        global_state = env.get_global_state(obs)
+        global_state = env.get_boid_global_state(obs)
         
         # Agent 0 state
         state_0 = global_state[0]

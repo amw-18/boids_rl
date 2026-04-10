@@ -19,11 +19,11 @@ class RLVision3D:
             num_predators=num_predators,
             space_size=space_size,
             perception_radius=15.0,
+            base_speed=5.0,
+            max_turn_angle=0.5,
+            max_force=2.0,
             device=device
         )
-        self.env.physics.base_speed = 5.0
-        self.env.physics.max_turn_angle = 0.5
-        self.env.physics.max_force = 2.0
         
         if checkpoint_path is not None:
             # Load checkpoint directly to find the expected Critic dimensions
@@ -42,7 +42,7 @@ class RLVision3D:
         # Initialize RL Brains
         self.stacked_frames = stacked_frames
         self.boid_brain = StarlingBrain(
-            obs_dim=18, 
+            obs_dim=self.env.obs_dim, 
             global_obs_dim=expected_global_obs_dim, 
             action_dim=3, 
             hidden_size=128,
@@ -56,13 +56,13 @@ class RLVision3D:
             if 'critic.0.weight' in pred_checkpoint:
                 pred_global_obs_dim = pred_checkpoint['critic.0.weight'].shape[1] // stacked_frames
             else:
-                pred_global_obs_dim = expected_global_obs_dim
+                pred_global_obs_dim = self.env.pred_global_obs_dim
         else:
             pred_checkpoint = None
-            pred_global_obs_dim = expected_global_obs_dim
+            pred_global_obs_dim = self.env.pred_global_obs_dim
         
         self.pred_brain = FalconBrain(
-            obs_dim=45,
+            obs_dim=self.env.pred_obs_dim,
             global_obs_dim=pred_global_obs_dim,
             action_dim=3,
             hidden_size=256,
@@ -82,8 +82,8 @@ class RLVision3D:
         self.pred_brain.eval()
         
         self.obs_boids, self.obs_preds = self.env.reset()
-        global_obs_boids = self.env.get_global_state(self.obs_boids)
-        global_obs_preds = self.env.get_global_state(self.obs_preds)
+        global_obs_boids = self.env.get_boid_global_state(self.obs_boids)
+        global_obs_preds = self.env.get_predator_global_state(self.obs_preds)
         
         # Initialize temporal frame buffers for inference
         self.rolling_obs_boids = self.obs_boids.unsqueeze(1).repeat(1, self.stacked_frames, 1)
@@ -133,8 +133,8 @@ class RLVision3D:
     def update(self, frame):
         # Shift temporal frame buffers left and insert new observed frame at the end
         if frame > 0:
-            global_obs_boids = self.env.get_global_state(self.obs_boids)
-            global_obs_preds = self.env.get_global_state(self.obs_preds)
+            global_obs_boids = self.env.get_boid_global_state(self.obs_boids)
+            global_obs_preds = self.env.get_predator_global_state(self.obs_preds)
             self.rolling_obs_boids = torch.cat([self.rolling_obs_boids[:, 1:, :], self.obs_boids.unsqueeze(1)], dim=1)
             self.rolling_global_boids = torch.cat([self.rolling_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
             self.rolling_obs_preds = torch.cat([self.rolling_obs_preds[:, 1:, :], self.obs_preds.unsqueeze(1)], dim=1)
@@ -145,12 +145,10 @@ class RLVision3D:
             P = self.env.num_predators
             
             flat_obs_boids = self.rolling_obs_boids.view(N, -1)
-            features_boids = self.boid_brain.actor_feature_extractor(flat_obs_boids)
-            action_batch = self.boid_brain.actor_mean(features_boids)
+            action_batch = self.boid_brain.get_deterministic_action(flat_obs_boids)
             
             flat_obs_preds = self.rolling_obs_preds.view(P, -1)
-            features_preds = self.pred_brain.actor_feature_extractor(flat_obs_preds)
-            pred_action_batch = self.pred_brain.actor_mean(features_preds)
+            pred_action_batch = self.pred_brain.get_deterministic_action(flat_obs_preds)
             
         # Step Vector Env directly with Tensor
         self.obs_boids, self.obs_preds, rewards, pred_rewards, dones = self.env.step(action_batch, predator_actions=pred_action_batch)

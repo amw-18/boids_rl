@@ -19,8 +19,8 @@ class VectorMurmurationEnv:
     Everything stays as PyTorch tensors on-device for maximum throughput.
 
     Interface:
-        reset()  -> obs (N, 16)
-        step(actions: (N, 3))  -> obs (N, 16), rewards (N,), dones (N,)
+        reset()  -> obs (N, 18)
+        step(actions: (N, 3))  -> obs (N, 18), rewards (N,), dones (N,)
     """
 
     def __init__(
@@ -29,6 +29,9 @@ class VectorMurmurationEnv:
         num_predators=5,
         space_size=100.0,
         perception_radius=10.0,
+        base_speed=5.0,
+        max_turn_angle=0.5,
+        max_force=2.0,
         device="cpu",
         gamma=0.99,
         pbrs_k=1.0,
@@ -46,13 +49,17 @@ class VectorMurmurationEnv:
             space_size=space_size,
             device=self.device,
             perception_radius=perception_radius,
+            base_speed=base_speed,
+            max_turn_angle=max_turn_angle,
+            max_force=max_force,
         )
 
         self.obs_dim = 18
+        self.pred_obs_dim = 10 + min(5, self.n_agents) * 7
         
         K = min(10, self.n_agents)
         self.global_obs_dim = self.obs_dim + (K * 7) + (num_predators * 6)
-        self.pred_global_obs_dim = 45 + (K * 7) + (num_predators * 6)
+        self.pred_global_obs_dim = self.pred_obs_dim + (K * 7) + (num_predators * 6)
         
         self.action_dim = 3
         self.num_moves = 0
@@ -124,7 +131,7 @@ class VectorMurmurationEnv:
             predator_actions: (P, 3) tensor
         Returns:
             obs_boids:   (N, 18) tensor
-            obs_preds:   (P, 45) tensor
+            obs_preds:   (P, pred_obs_dim) tensor
             rewards_boids: (N,) tensor
             rewards_preds: (P,) tensor
             dones: (N,) bool tensor  (True = terminated or truncated)
@@ -276,7 +283,8 @@ class VectorMurmurationEnv:
     def _get_predator_observations(self):
         """
         Build local observation vectors for the RL Predators.
-        Features: (Own Kinematics) + (Mean Field CoM) + (5 Closest Starlings w/ Visual Obfuscation)
+        Features: (Own Kinematics) + (Mean Field CoM) + (k Closest Starlings w/ Visual Obfuscation),
+        where k=min(5, num_agents).
         """
         pred_pos = self.physics.predator_position # (P, 3)
         pred_vel = self.physics.predator_velocity # (P, 3)
@@ -337,33 +345,22 @@ class VectorMurmurationEnv:
         # Concat all elements
         target_obs_tensor = torch.cat(target_obs, dim=1) if len(target_obs) > 0 else torch.zeros((self.num_predators, 0), device=self.device)
 
-        # Total Predator Obs: (P, 3(pos) + 3(vel) + 1(stam) + 3(com) + 5*(3+3+1)) = (P, 45)
+        # Total Predator Obs: (P, 10 + k * 7), where k=min(5, num_agents)
         obs = torch.cat([pos_relative, vel_norm, stamina_norm, com_relative, target_obs_tensor], dim=1)
         return obs
-        
-    def get_global_state(self, local_obs):
-        """
-        Returns the global state tensor for the Centralized Critic using K-Nearest approximation.
-        Combines the focal agent's local observation with the exact relative states 
-        of its K-nearest neighbors and all predators.
-        """
+
+    def _build_global_state(self, local_obs, focal_pos, *, exclude_self):
+        """Build the centralized critic state from an explicit focal-agent population."""
         batch_size = local_obs.shape[0]
-        is_boid = (batch_size == self.n_agents)
-        
         pos = self.physics.positions # (N, 3)
         vel = self.physics.velocities # (N, 3)
         alive = self.physics.alive_mask # (N,)
-        
-        if is_boid:
-            focal_pos = pos
-        else:
-            focal_pos = self.physics.predator_position
-            
+
         K = min(10, self.n_agents)
         dist_matrix = torch.cdist(focal_pos, pos) # (batch_size, N)
         dist_matrix = torch.where(alive.unsqueeze(0), dist_matrix, self._inf)
-        
-        if is_boid:
+
+        if exclude_self:
             # Mask out self
             dist_matrix = torch.where(self._diag_mask, self._inf, dist_matrix)
             
@@ -376,13 +373,13 @@ class VectorMurmurationEnv:
         # We must mask out the focal agent's alive flag if it gets pulled into the 
         # padding slots due to a small swarm size.
         k_alive = alive[closest_idx].float() # (batch_size, K)
-        if is_boid:
+        if exclude_self:
             focal_idx = torch.arange(batch_size, device=self.device).unsqueeze(1)
             k_alive = torch.where(closest_idx == focal_idx, 0.0, k_alive)
         k_alive = k_alive.unsqueeze(-1) # (batch_size, K, 1)
         
-        rel_pos = (k_pos - focal_pos.unsqueeze(1)) / self._half_space
-        rel_vel = k_vel / self.physics.base_speed
+        rel_pos = ((k_pos - focal_pos.unsqueeze(1)) / self._half_space) * k_alive
+        rel_vel = (k_vel / self.physics.base_speed) * k_alive
         
         k_features = torch.cat([rel_pos, rel_vel, k_alive], dim=-1) # (batch_size, K, 7)
         k_features_flat = k_features.view(batch_size, -1) # (batch_size, K * 7)
@@ -399,6 +396,35 @@ class VectorMurmurationEnv:
         
         global_state = torch.cat([local_obs, k_features_flat, pred_features_flat], dim=1)
         return global_state
+
+    def get_boid_global_state(self, local_obs):
+        if local_obs.shape[0] != self.n_agents:
+            raise ValueError("boid global state expects one local observation per boid.")
+        return self._build_global_state(local_obs, self.physics.positions, exclude_self=True)
+
+    def get_predator_global_state(self, local_obs):
+        if local_obs.shape[0] != self.num_predators:
+            raise ValueError("predator global state expects one local observation per predator.")
+        return self._build_global_state(local_obs, self.physics.predator_position, exclude_self=False)
+
+    def get_global_state(self, local_obs, agent_type=None):
+        """
+        Backwards-compatible wrapper for centralized critic state construction.
+        """
+        if agent_type == "boid":
+            return self.get_boid_global_state(local_obs)
+        if agent_type == "predator":
+            return self.get_predator_global_state(local_obs)
+
+        batch_size = local_obs.shape[0]
+        if batch_size == self.n_agents and self.n_agents != self.num_predators:
+            return self.get_boid_global_state(local_obs)
+        if batch_size == self.num_predators and self.n_agents != self.num_predators:
+            return self.get_predator_global_state(local_obs)
+
+        raise ValueError(
+            "agent_type must be provided when local_obs batch size is ambiguous."
+        )
 
     # ------------------------------------------------------------------
     # Vectorized rewards — zero Python loops
@@ -417,19 +443,14 @@ class VectorMurmurationEnv:
         # Pairwise distances — compile-friendly
         dist_matrix = torch.cdist(pos, pos)
         dist_matrix = torch.where(self._diag_mask, self._inf, dist_matrix)
-
-        nearest_dist = dist_matrix.min(dim=1).values
-
-        # Social: comfortable range [2, perception_radius]
-        comfortable = (dist_matrix >= 2.0) & (dist_matrix <= self.perception_radius)
-        social_count = comfortable.sum(dim=1).float()
+        live_pair_mask = alive.unsqueeze(0) & alive.unsqueeze(1)
+        live_dist_matrix = torch.where(live_pair_mask, dist_matrix, self._inf)
 
         # Collisions: < 2.0
-        collision_count = (dist_matrix < 2.0).sum(dim=1).float()
+        collision_count = (live_dist_matrix < 2.0).sum(dim=1).float()
 
         # Predator deaths (physics already updated alive_mask)
-        killed_by_predator = ~alive & ~self._dead_mask  # newly killed by predator
-        new_deaths = killed_by_predator
+        new_deaths = self.physics.last_capture_mask
 
         # Potential-Based Reward Shaping (PBRS)
         
@@ -439,8 +460,7 @@ class VectorMurmurationEnv:
         phi_bounds = -self._pbrs_k * d_center_sq
         
         # 2. Density Potential (phi_density) — must mask dead agents like PZ env
-        dist_matrix_masked = torch.where(~alive.unsqueeze(0), self._inf, dist_matrix)
-        in_radius = (dist_matrix_masked < self.perception_radius) & alive.unsqueeze(0)
+        in_radius = live_dist_matrix < self.perception_radius
         local_density = in_radius.float().sum(dim=1) / self.n_agents
         phi_density = self._pbrs_c * local_density
         
@@ -471,13 +491,8 @@ class VectorMurmurationEnv:
         rewards_preds = torch.zeros(self.num_predators, device=self.device)
 
         # Catch reward: +10.0 per boid caught this step
-        catches_per_pred = torch.zeros(self.num_predators, device=self.device)
-        if new_deaths.any():
-            dist_pred_boid = torch.cdist(pred_pos, pos)  # (P, N)
-            catch_matrix = dist_pred_boid < self.physics.predator_catch_radius  # (P, N)
-            # Only count newly dead boids (not already-dead ones)
-            catches_per_pred = (catch_matrix & new_deaths.unsqueeze(0)).float().sum(dim=1)  # (P,)
-            rewards_preds += 10.0 * catches_per_pred
+        catches_per_pred = self.physics.last_capture_counts
+        rewards_preds += 10.0 * catches_per_pred
 
         # Hunger penalty: constant penalty per step to encourage quick catches
         is_cooldown = self.physics.predator_cooldown > 0

@@ -164,7 +164,7 @@ def test_global_state():
     env = VectorMurmurationEnv(num_agents=N, device=device)
     obs, _ = env.reset()
     
-    global_state = env.get_global_state(obs)
+    global_state = env.get_boid_global_state(obs)
     
     # Expected dimensions for K-Nearest Boid Global State
     K = min(10, N)
@@ -181,7 +181,7 @@ def test_centralized_critic():
     device = "cpu"
     env = VectorMurmurationEnv(num_agents=N, device=device)
     obs, _ = env.reset()
-    global_obs = env.get_global_state(obs)
+    global_obs = env.get_boid_global_state(obs)
     
     # Brain expects single frame dim if passing stacked_frames
     # For testing unstacked, pass stacked_frames=1
@@ -197,6 +197,7 @@ def test_centralized_critic():
     actions, log_probs, entropies, values = brain.get_action_and_value(obs, global_obs)
     
     assert actions.shape == (N, 3), "Actor output mismatch"
+    assert torch.all(actions.abs() <= 1.0 + 1e-6), "Sampled actions must stay within [-1, 1]"
     assert log_probs.shape == (N,), "Logprob shape mismatch"
     assert values.shape == (N, 1), "Centralized Critic output mismatch"
     

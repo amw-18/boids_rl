@@ -23,19 +23,17 @@ class BoidsPhysics:
         self.num_predators = num_predators
         self.space_size = space_size
         self.device = device
+        self._inf = torch.tensor(float("inf"), device=self.device)
         
         # Physics hyperparams
         self.perception_radius = perception_radius
-        self.base_speed = base_speed
-        self.max_turn_angle = max_turn_angle
-        self.max_force = max_force
         self.dt = dt
         self.min_speed = min_speed
-        
-        # Predator properties
-        self.predator_base_speed = base_speed
-        self.predator_sprint_speed = base_speed * 1.5 
-        self.predator_turn_angle = max_turn_angle * 1.5
+        self.configure_motion_limits(
+            base_speed=base_speed,
+            max_turn_angle=max_turn_angle,
+            max_force=max_force,
+        )
         self.predator_catch_radius = 2.0  # Starts at 2.0, decays via curriculum in env
         
         # Co-Evolution Parameters: Stamina Economy
@@ -48,9 +46,33 @@ class BoidsPhysics:
         self.predator_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
         self.predator_cooldown_duration = 50 # Frames disabled after a successful catch
         self.predator_time_since_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
+        self.last_capture_mask = torch.zeros(self.num_boids, dtype=torch.bool, device=self.device)
+        self.last_capture_predators = torch.full((self.num_boids,), -1, dtype=torch.long, device=self.device)
+        self.last_capture_counts = torch.zeros(self.num_predators, dtype=torch.float32, device=self.device)
 
 
         self.reset()
+
+    def configure_motion_limits(
+        self,
+        *,
+        base_speed: float,
+        max_turn_angle: float,
+        max_force: float,
+    ):
+        self.base_speed = base_speed
+        self.max_turn_angle = max_turn_angle
+        self.max_force = max_force
+
+        # Predator properties are derived from the prey motion limits and must stay in sync.
+        self.predator_base_speed = base_speed
+        self.predator_sprint_speed = base_speed * 1.5
+        self.predator_turn_angle = max_turn_angle * 1.5
+
+    def _clear_capture_events(self):
+        self.last_capture_mask.zero_()
+        self.last_capture_predators.fill_(-1)
+        self.last_capture_counts.zero_()
         
     def reset(self):
         """Randomly initialize positions and velocities."""
@@ -105,6 +127,7 @@ class BoidsPhysics:
         self.predator_stamina.fill_(self.predator_max_stamina)
         self.predator_cooldown.zero_()
         self.predator_time_since_cooldown.zero_()
+        self._clear_capture_events()
 
         # Boids that have been eaten (boolean mask, True = alive, False = dead)
         self.alive_mask = torch.ones(self.num_boids, dtype=torch.bool, device=self.device)
@@ -117,8 +140,11 @@ class BoidsPhysics:
             boid_actions: Tensor of shape (num_boids, 3) representing (Thrust, Roll Rate, Pitch Rate) in [-1, 1].
             predator_actions: Tensor of shape (num_predators, 3) representing (Sprint, Roll Rate, Pitch Rate) in [-1, 1].
         """
+        self._clear_capture_events()
+
         if boid_actions is None:
             boid_actions = torch.zeros((self.num_boids, 3), device=self.device)
+        boid_actions = boid_actions.clamp(min=-1.0, max=1.0)
             
         thrust_action = boid_actions[:, 0:1] # [-1, 1]
         roll_action = boid_actions[:, 1:2]   # [-1, 1]
@@ -182,6 +208,7 @@ class BoidsPhysics:
         """Update predator velocity and position via continuous RL controls with stamina."""
         if actions is None:
             actions = torch.zeros((self.num_predators, 3), device=self.device)
+        actions = actions.clamp(min=-1.0, max=1.0)
 
         sprint_action = actions[:, 0:1] # [-1, 1], >0 is sprinting
         roll_action = actions[:, 1:2]   # [-1, 1]
@@ -249,22 +276,36 @@ class BoidsPhysics:
         self.predator_position += self.predator_velocity * self.dt
         
     def _check_captures(self):
-        """Mark boids as dead if ANY predator touches them. Apply cooldowns."""
+        """Mark alive boids as dead if touched and assign the catch to a single predator."""
+        self._clear_capture_events()
+
         if not self.alive_mask.any():
             return
             
         # Distance from ALL predators to ALL boids
         dist_to_predator = torch.cdist(self.predator_position, self.positions)
         
-        # Boids are caught if distance < catch_radius for ANY predator
-        caught_matrix = dist_to_predator < self.predator_catch_radius
+        # Only currently alive prey can trigger captures and cooldowns.
+        caught_matrix = (dist_to_predator < self.predator_catch_radius) & self.alive_mask.unsqueeze(0)
         caught = caught_matrix.any(dim=0) # (N_boids,)
-        
+
+        if not caught.any():
+            return
+
+        caught_distances = torch.where(caught_matrix, dist_to_predator, self._inf)
+        assigned_predators = torch.argmin(caught_distances, dim=0)
+        self.last_capture_mask.copy_(caught)
+        self.last_capture_predators[caught] = assigned_predators[caught]
+
+        predator_ids = torch.arange(self.num_predators, device=self.device).unsqueeze(1)
+        assigned = assigned_predators[caught].unsqueeze(0)
+        self.last_capture_counts = (predator_ids == assigned).sum(dim=1).to(dtype=torch.float32)
+
         # Update alive mask
         self.alive_mask &= ~caught
-        
+
         # WHICH predators made a catch?
-        caught_by_predator = caught_matrix.any(dim=1) # (num_predators,)
+        caught_by_predator = self.last_capture_counts > 0
         
         if caught_by_predator.any():
             # Apply cooldown to successful predators, freezing their ability to sprint

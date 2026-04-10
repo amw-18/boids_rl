@@ -101,8 +101,8 @@ class AlternatingCoevolutionTrainer:
         Run the environment for `num_steps`, collecting joint experience for both populations simultaneously.
         """
         obs_boids, obs_preds = self.env.reset()
-        global_obs_boids = self.env.get_global_state(obs_boids)
-        global_obs_preds = self.env.get_global_state(obs_preds)
+        global_obs_boids = self.env.get_boid_global_state(obs_boids)
+        global_obs_preds = self.env.get_predator_global_state(obs_preds)
 
         N = self.env.n_agents
         P = self.env.num_predators
@@ -132,8 +132,8 @@ class AlternatingCoevolutionTrainer:
 
         for step in range(num_steps):
             if step > 0:
-                global_obs_boids = self.env.get_global_state(obs_boids)
-                global_obs_preds = self.env.get_global_state(obs_preds)
+                global_obs_boids = self.env.get_boid_global_state(obs_boids)
+                global_obs_preds = self.env.get_predator_global_state(obs_preds)
                 
                 roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
                 roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
@@ -179,11 +179,11 @@ class AlternatingCoevolutionTrainer:
             obs_boids, obs_preds = next_obs_boids, next_obs_preds
 
         # Final Bootstrapping
-        global_obs_boids = self.env.get_global_state(obs_boids)
+        global_obs_boids = self.env.get_boid_global_state(obs_boids)
         roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
         roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
         
-        global_obs_preds = self.env.get_global_state(obs_preds)
+        global_obs_preds = self.env.get_predator_global_state(obs_preds)
         roll_obs_preds = torch.cat([roll_obs_preds[:, 1:, :], obs_preds.unsqueeze(1)], dim=1)
         roll_global_preds = torch.cat([roll_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
 
@@ -207,7 +207,7 @@ class AlternatingCoevolutionTrainer:
         values  = rollouts["values"]
 
         with torch.no_grad():
-            _, _, _, norm_next_value = brain.get_action_and_value(rollouts["final_obs"], rollouts["final_global_obs"])
+            norm_next_value = brain.get_value(rollouts["final_global_obs"])
             next_value = value_normalizer.denormalize(norm_next_value).flatten()
 
         advantages = torch.zeros_like(rewards)

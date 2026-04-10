@@ -72,18 +72,16 @@ def main():
         num_predators=config["num_predators"],
         space_size=config["space_size"],
         perception_radius=config["perception_radius"],
+        base_speed=config["base_speed"],
+        max_turn_angle=config["max_turn_angle"],
+        max_force=config["max_force"],
         device=device_name,
     )
     
-    # Override physics engine with new biological limits from config
-    env.physics.base_speed = config["base_speed"]
-    env.physics.max_turn_angle = config["max_turn_angle"]
-    env.physics.max_force = config["max_force"]
-    
     # --- 3. Initialize Shared Brains ---
     dummy_obs_boids, dummy_obs_preds = env.reset()
-    dummy_global_obs_boids = env.get_global_state(dummy_obs_boids)
-    dummy_global_obs_preds = env.get_global_state(dummy_obs_preds)
+    dummy_global_obs_boids = env.get_boid_global_state(dummy_obs_boids)
+    dummy_global_obs_preds = env.get_predator_global_state(dummy_obs_preds)
     
     boid_obs_dim = dummy_obs_boids.shape[-1]
     boid_global_obs_dim = dummy_global_obs_boids.shape[-1]

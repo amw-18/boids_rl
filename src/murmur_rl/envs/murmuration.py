@@ -17,7 +17,20 @@ class MurmurationEnv(ParallelEnv):
         "name": "murmuration_v0"
     }
 
-    def __init__(self, num_agents=50, num_predators=5, space_size=100.0, perception_radius=10.0, device='cpu', gamma=0.99, pbrs_k=1.0, pbrs_c=1.0):
+    def __init__(
+        self,
+        num_agents=50,
+        num_predators=5,
+        space_size=100.0,
+        perception_radius=10.0,
+        base_speed=5.0,
+        max_turn_angle=0.5,
+        max_force=2.0,
+        device='cpu',
+        gamma=0.99,
+        pbrs_k=1.0,
+        pbrs_c=1.0,
+    ):
         super().__init__()
         self.n_agents = num_agents
         self.num_predators = num_predators
@@ -42,7 +55,10 @@ class MurmurationEnv(ParallelEnv):
             num_predators=num_predators,
             space_size=space_size,
             device=self.device,
-            perception_radius=perception_radius
+            perception_radius=perception_radius,
+            base_speed=base_speed,
+            max_turn_angle=max_turn_angle,
+            max_force=max_force,
         )
 
         # Action space: 3D continuous force vector [-1, 1] mapped to max_force
@@ -271,14 +287,15 @@ class MurmurationEnv(ParallelEnv):
         # Pairwise distance
         dist_matrix = torch.cdist(pos, pos)
         dist_matrix.fill_diagonal_(float('inf'))
+        live_dist_matrix = dist_matrix.clone()
+        live_dist_matrix.masked_fill_(~alive.unsqueeze(0), float('inf'))
+        live_dist_matrix.masked_fill_(~alive.unsqueeze(1), float('inf'))
         
         # Collision: distance < 2.0 is bad
-        collision_count = (dist_matrix < 2.0).sum(dim=1).float()
-        
+        collision_count = (live_dist_matrix < 2.0).sum(dim=1).float()
+
         # Density for PBRS
-        dist_matrix_masked = dist_matrix.clone()
-        dist_matrix_masked.masked_fill_(~alive.unsqueeze(0), float('inf'))
-        in_radius_mask = (dist_matrix_masked < self.perception_radius) & alive.unsqueeze(0)
+        in_radius_mask = live_dist_matrix < self.perception_radius
         local_density = in_radius_mask.sum(dim=1).float() / self.n_agents
         
         for i, agent in enumerate(self.possible_agents):
