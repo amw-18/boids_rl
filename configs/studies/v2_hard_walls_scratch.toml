@@ -1,0 +1,81 @@
+[study]
+id = "v2-hard-walls-scratch"
+name = "Hard-wall predator-prey scratch run"
+claim = "Short smoke-run variant of the hard-wall benchmark."
+description = "Recommended first-run config for validating the hard-wall setup before launching a long training job."
+notes = "Matches v2_hard_walls.toml except for training-length oriented defaults."
+default_tags = ["week2", "hard-walls", "scratch"]
+
+[environment]
+num_agents = 100
+num_predators = 10
+space_size = 50.0
+perception_radius = 15.0
+base_speed = 5.0
+max_turn_angle = 0.5
+max_force = 2.0
+min_speed = 2.5
+dt = 0.1
+max_steps = 500
+gamma = 0.99
+boundary_mode = "hard_walls"
+pbrs_k = 0.0
+pbrs_c = 2.0
+wall_soft_margin = 7.5
+wall_penalty = 0.5
+predator_wall_penalty = 0.15
+wall_bounce_damping = 1.0
+curriculum_enabled = false
+predator_catch_radius_start = 1.5
+predator_catch_radius_end = 1.5
+predator_catch_radius_decay_steps = 1
+predator_visual_noise_variance = 5.0
+predator_sprint_multiplier = 1.5
+predator_turn_multiplier = 1.5
+predator_cooldown_duration = 50
+predator_max_stamina = 100.0
+predator_sprint_drain = 1.0
+predator_recovery_rate = 0.5
+survival_reward = 0.1
+collision_penalty = 1.0
+death_penalty = -100.0
+predator_catch_reward = 10.0
+predator_team_catch_reward = 1.0
+predator_hunger_penalty = -0.05
+
+[training]
+rollout_steps = 500
+num_epochs = 1000
+actor_lr = 0.0003
+predator_actor_lr = 0.0002
+critic_lr = 0.001
+gae_lambda = 0.95
+clip_coef = 0.2
+ent_coef = 0.02
+entropy_final_coef = 0.002
+entropy_anneal_epochs = 5000
+vf_coef = 0.5
+max_grad_norm = 0.5
+target_kl = 0.015
+update_epochs = 4
+batch_size = 1024
+stacked_frames = 4
+boid_hidden_size = 128
+predator_hidden_size = 256
+critic_hidden_size = 512
+checkpoint_interval = 500
+compile_models = true
+compile_env = true
+wandb_project = "murmur_rl"
+wandb_run_name = "hard-wall scratch"
+
+[evaluation]
+num_episodes = 3
+episode_steps = 500
+render_frames = 1800
+seed_offset = 1000
+
+[metrics]
+distance_graph_radius = 15.0
+fringe_radius_fraction = 0.9
+histogram_bins = 20

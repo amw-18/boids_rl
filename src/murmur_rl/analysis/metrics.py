@@ -57,7 +57,9 @@ def compute_population_metrics(
             "heading_alignment": 0.0,
             "connected_components": 0.0,
             "radial_spread": 0.0,
+            "distance_to_center": 0.0,
             "fringe_fraction": 0.0,
+            "outside_fraction": 0.0,
             "nearest_neighbor_distance_values": [],
             "local_density_values": [],
         }
@@ -81,6 +83,10 @@ def compute_population_metrics(
     center_of_mass = alive_positions.mean(dim=0)
     radial_distances = torch.norm(alive_positions - center_of_mass, dim=-1)
     radial_spread = float(radial_distances.mean().item()) if alive_count > 0 else 0.0
+    world_center = torch.full((3,), space_size / 2.0, device=positions.device, dtype=alive_positions.dtype)
+    distance_to_center = float(torch.norm(alive_positions - world_center, dim=-1).mean().item())
+    outside_mask = ((alive_positions < 0.0) | (alive_positions > space_size)).any(dim=1)
+    outside_fraction = float(outside_mask.float().mean().item()) if alive_count > 0 else 0.0
 
     max_radius = float(radial_distances.max().item()) if alive_count > 0 else 0.0
     if max_radius <= 0.0:
@@ -96,7 +102,9 @@ def compute_population_metrics(
         "heading_alignment": polarization,
         "connected_components": float(connected_components),
         "radial_spread": radial_spread,
+        "distance_to_center": distance_to_center,
         "fringe_fraction": fringe_fraction,
+        "outside_fraction": outside_fraction,
         "nearest_neighbor_distance_values": nearest_neighbor.cpu().tolist(),
         "local_density_values": local_density.cpu().tolist(),
     }
@@ -119,7 +127,9 @@ class EpisodeMetricAccumulator:
             "heading_alignment": [],
             "connected_components": [],
             "radial_spread": [],
+            "distance_to_center": [],
             "fringe_fraction": [],
+            "outside_fraction": [],
         }
     )
     nearest_neighbor_values: list[float] = field(default_factory=list)
