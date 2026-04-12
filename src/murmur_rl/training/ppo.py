@@ -113,6 +113,12 @@ class AlternatingCoevolutionTrainer:
         
         roll_obs_preds = obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
         roll_global_preds = global_obs_preds.unsqueeze(1).repeat(1, self.stacked_frames, 1)
+        frame_orders = [
+            (torch.arange(self.stacked_frames, device=self.device) + idx + 1) % self.stacked_frames
+            for idx in range(self.stacked_frames)
+        ]
+        boid_frame_idx = self.stacked_frames - 1
+        pred_frame_idx = self.stacked_frames - 1
 
         b_obs       = torch.empty((num_steps, N, self.stacked_frames * obs_boids.shape[-1]), device=self.device)
         b_globs     = torch.empty((num_steps, N, self.stacked_frames * global_obs_boids.shape[-1]), device=self.device)
@@ -134,17 +140,18 @@ class AlternatingCoevolutionTrainer:
             if step > 0:
                 global_obs_boids = self.env.get_boid_global_state(obs_boids)
                 global_obs_preds = self.env.get_predator_global_state(obs_preds)
-                
-                roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
-                roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
-                
-                roll_obs_preds = torch.cat([roll_obs_preds[:, 1:, :], obs_preds.unsqueeze(1)], dim=1)
-                roll_global_preds = torch.cat([roll_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
 
-            flat_obs_boids = roll_obs_boids.view(N, -1)
-            flat_globs_boids = roll_global_boids.view(N, -1)
-            flat_obs_preds = roll_obs_preds.view(P, -1)
-            flat_globs_preds = roll_global_preds.view(P, -1)
+                boid_frame_idx = (boid_frame_idx + 1) % self.stacked_frames
+                pred_frame_idx = (pred_frame_idx + 1) % self.stacked_frames
+                roll_obs_boids[:, boid_frame_idx] = obs_boids
+                roll_global_boids[:, boid_frame_idx] = global_obs_boids
+                roll_obs_preds[:, pred_frame_idx] = obs_preds
+                roll_global_preds[:, pred_frame_idx] = global_obs_preds
+
+            flat_obs_boids = roll_obs_boids[:, frame_orders[boid_frame_idx]].reshape(N, -1)
+            flat_globs_boids = roll_global_boids[:, frame_orders[boid_frame_idx]].reshape(N, -1)
+            flat_obs_preds = roll_obs_preds[:, frame_orders[pred_frame_idx]].reshape(P, -1)
+            flat_globs_preds = roll_global_preds[:, frame_orders[pred_frame_idx]].reshape(P, -1)
             
             b_obs[step], b_globs[step] = flat_obs_boids, flat_globs_boids
             p_obs[step], p_globs[step] = flat_obs_preds, flat_globs_preds
@@ -174,29 +181,33 @@ class AlternatingCoevolutionTrainer:
             # Flush dead boid history
             if dones_boids.any():
                 dead_mask = dones_boids.bool()
-                roll_obs_boids[dead_mask] = next_obs_boids[dead_mask].unsqueeze(1).repeat(1, self.stacked_frames, 1)
+                roll_obs_boids[dead_mask] = next_obs_boids[dead_mask].unsqueeze(1).expand(-1, self.stacked_frames, -1)
 
             obs_boids, obs_preds = next_obs_boids, next_obs_preds
 
         # Final Bootstrapping
         global_obs_boids = self.env.get_boid_global_state(obs_boids)
-        roll_obs_boids = torch.cat([roll_obs_boids[:, 1:, :], obs_boids.unsqueeze(1)], dim=1)
-        roll_global_boids = torch.cat([roll_global_boids[:, 1:, :], global_obs_boids.unsqueeze(1)], dim=1)
+        boid_frame_idx = (boid_frame_idx + 1) % self.stacked_frames
+        roll_obs_boids[:, boid_frame_idx] = obs_boids
+        roll_global_boids[:, boid_frame_idx] = global_obs_boids
         
         global_obs_preds = self.env.get_predator_global_state(obs_preds)
-        roll_obs_preds = torch.cat([roll_obs_preds[:, 1:, :], obs_preds.unsqueeze(1)], dim=1)
-        roll_global_preds = torch.cat([roll_global_preds[:, 1:, :], global_obs_preds.unsqueeze(1)], dim=1)
+        pred_frame_idx = (pred_frame_idx + 1) % self.stacked_frames
+        roll_obs_preds[:, pred_frame_idx] = obs_preds
+        roll_global_preds[:, pred_frame_idx] = global_obs_preds
 
         boid_rollouts = {
             "obs": b_obs, "global_obs": b_globs, "actions": b_acts, "logprobs": b_logps,
             "rewards": b_rews, "dones": b_dones, "values": b_vals,
-            "final_obs": roll_obs_boids.view(N, -1), "final_global_obs": roll_global_boids.view(N, -1)
+            "final_obs": roll_obs_boids[:, frame_orders[boid_frame_idx]].reshape(N, -1),
+            "final_global_obs": roll_global_boids[:, frame_orders[boid_frame_idx]].reshape(N, -1),
         }
         
         pred_rollouts = {
             "obs": p_obs, "global_obs": p_globs, "actions": p_acts, "logprobs": p_logps,
             "rewards": p_rews, "dones": p_dones, "values": p_vals,
-            "final_obs": roll_obs_preds.view(P, -1), "final_global_obs": roll_global_preds.view(P, -1)
+            "final_obs": roll_obs_preds[:, frame_orders[pred_frame_idx]].reshape(P, -1),
+            "final_global_obs": roll_global_preds[:, frame_orders[pred_frame_idx]].reshape(P, -1),
         }
 
         return boid_rollouts, pred_rollouts

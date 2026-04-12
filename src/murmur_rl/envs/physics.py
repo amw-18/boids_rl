@@ -17,7 +17,14 @@ class BoidsPhysics:
         max_turn_angle: float = 0.5, # radians per timestep
         max_force: float = 2.0,
         dt: float = 0.1,
-        min_speed: float = 2.5
+        min_speed: float = 2.5,
+        predator_sprint_multiplier: float = 1.5,
+        predator_turn_multiplier: float = 1.5,
+        predator_catch_radius: float = 2.0,
+        predator_max_stamina: float = 100.0,
+        predator_sprint_drain: float = 1.0,
+        predator_recovery_rate: float = 0.5,
+        predator_cooldown_duration: int = 50,
     ):
         self.num_boids = num_boids
         self.num_predators = num_predators
@@ -29,22 +36,24 @@ class BoidsPhysics:
         self.perception_radius = perception_radius
         self.dt = dt
         self.min_speed = min_speed
+        self.predator_sprint_multiplier = predator_sprint_multiplier
+        self.predator_turn_multiplier = predator_turn_multiplier
         self.configure_motion_limits(
             base_speed=base_speed,
             max_turn_angle=max_turn_angle,
             max_force=max_force,
         )
-        self.predator_catch_radius = 2.0  # Starts at 2.0, decays via curriculum in env
+        self.predator_catch_radius = predator_catch_radius
         
         # Co-Evolution Parameters: Stamina Economy
-        self.predator_max_stamina = 100.0 # total sprint capacity
-        self.predator_sprint_drain = 1.0  # Stamina drain per frame while sprinting
-        self.predator_recovery_rate = 0.5 # Stamina recovery per frame while cruising
+        self.predator_max_stamina = predator_max_stamina # total sprint capacity
+        self.predator_sprint_drain = predator_sprint_drain  # Stamina drain per frame while sprinting
+        self.predator_recovery_rate = predator_recovery_rate # Stamina recovery per frame while cruising
         
         # Track individual predator energy
         self.predator_stamina = torch.full((self.num_predators,), self.predator_max_stamina, device=self.device)
         self.predator_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
-        self.predator_cooldown_duration = 50 # Frames disabled after a successful catch
+        self.predator_cooldown_duration = predator_cooldown_duration # Frames disabled after a successful catch
         self.predator_time_since_cooldown = torch.zeros(self.num_predators, dtype=torch.long, device=self.device)
         self.last_capture_mask = torch.zeros(self.num_boids, dtype=torch.bool, device=self.device)
         self.last_capture_predators = torch.full((self.num_boids,), -1, dtype=torch.long, device=self.device)
@@ -66,8 +75,8 @@ class BoidsPhysics:
 
         # Predator properties are derived from the prey motion limits and must stay in sync.
         self.predator_base_speed = base_speed
-        self.predator_sprint_speed = base_speed * 1.5
-        self.predator_turn_angle = max_turn_angle * 1.5
+        self.predator_sprint_speed = base_speed * self.predator_sprint_multiplier
+        self.predator_turn_angle = max_turn_angle * self.predator_turn_multiplier
 
     def _clear_capture_events(self):
         self.last_capture_mask.zero_()

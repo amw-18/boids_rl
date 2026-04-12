@@ -1,0 +1,23 @@
+[experiment]
+id = "baseline-random-vs-random"
+name = "Random prey vs random predator"
+description = "Null baseline for the frozen shaped study: both populations act randomly."
+
+study_config = "../../studies/v1_shaped_current.toml"
+
+[evaluation]
+num_episodes = 3
+seeds = [0, 1, 2]
+
+[prey_policy]
+type = "random"
+deterministic = true
+label = "random-prey"
+
+[predator_policy]
+type = "random"
+deterministic = true
+label = "random-predator"
+
+[output]
+subdir = "analysis"

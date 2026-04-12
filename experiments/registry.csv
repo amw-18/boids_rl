@@ -1,0 +1,8 @@
+created_at_utc,run_id,run_type,study_id,config_path,git_commit,seed,status,artifact_path,notes
+2026-04-10T19:10:13+00:00,smoke-analysis,analysis,v1-shaped-current,,3b81c48259440fc7bdd90894be6ae54e24e52558,0,completed,D:\workspace\boids_rl\experiments\runs\smoke-analysis\analysis\summary.json,CLI-specified analysis run.
+2026-04-10T22:03:01+00:00,scratch-s0-eval,analysis,v1-shaped-current,,b84ef0d73666527c781ceae40d42ac3e47840e15,0,completed,D:\workspace\boids_rl\experiments\runs\scratch-s0-eval\analysis\summary.json,CLI-specified analysis run.
+2026-04-11T10:53:41+00:00,scratch-s0,training,v1-shaped-current,D:\workspace\boids_rl\test_config.toml,fed0905101084ea243bd0bc32c014463eb575d09,0,completed,D:\workspace\boids_rl\experiments\runs\scratch-s0\run_manifest.json,Frozen week-1 study version of the existing shaped predator-prey environment.
+2026-04-11T13:40:26+00:00,scratch-s0-eval,analysis,v1-shaped-current,,fed0905101084ea243bd0bc32c014463eb575d09,0,completed,D:\workspace\boids_rl\experiments\runs\scratch-s0-eval\analysis\summary.json,CLI-specified analysis run.
+2026-04-11T17:52:02+00:00,full-v1-eval,analysis,v1-shaped-current,,fed0905101084ea243bd0bc32c014463eb575d09,0,completed,D:\workspace\boids_rl\experiments\runs\full-v1-eval\analysis\summary.json,CLI-specified analysis run.
+2026-04-12T04:03:11+00:00,full-v1-eval,analysis,v1-shaped-current,,fed0905101084ea243bd0bc32c014463eb575d09,0,completed,D:\workspace\boids_rl\experiments\runs\full-v1-eval\analysis\summary.json,CLI-specified analysis run.
+2026-04-12T06:24:47+00:00,full-v1-eval,analysis,v1-shaped-current,,fed0905101084ea243bd0bc32c014463eb575d09,0,completed,D:\workspace\boids_rl\experiments\runs\full-v1-eval\analysis\summary.json,CLI-specified analysis run.

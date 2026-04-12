@@ -1,0 +1,73 @@
+[study]
+id = "v1-shaped-current"
+name = "Current shaped predator-prey benchmark"
+claim = "Under the current shaped setup, do we get robust, measurable collective structure that improves survival?"
+description = "Frozen week-1 study version of the existing shaped predator-prey environment."
+notes = "This is a draft freeze of the current shaped setup. The claim sentence should be explicitly confirmed by the project owner before week-2 runs."
+default_tags = ["week1", "shaped", "benchmark"]
+
+[environment]
+num_agents = 100
+num_predators = 10
+space_size = 50.0
+perception_radius = 15.0
+base_speed = 5.0
+max_turn_angle = 0.5
+max_force = 2.0
+min_speed = 2.5
+dt = 0.1
+max_steps = 500
+gamma = 0.99
+pbrs_k = 1.0
+pbrs_c = 1.0
+curriculum_enabled = true
+predator_catch_radius_start = 2.0
+predator_catch_radius_end = 0.5
+predator_catch_radius_decay_steps = 5000000
+predator_visual_noise_variance = 5.0
+predator_sprint_multiplier = 1.5
+predator_turn_multiplier = 1.5
+predator_cooldown_duration = 50
+predator_max_stamina = 100.0
+predator_sprint_drain = 1.0
+predator_recovery_rate = 0.5
+survival_reward = 0.1
+collision_penalty = 2.0
+death_penalty = -100.0
+predator_catch_reward = 10.0
+predator_hunger_penalty = -0.05
+
+[training]
+rollout_steps = 500
+num_epochs = 1000
+actor_lr = 0.0003
+predator_actor_lr = 0.0001
+critic_lr = 0.001
+gae_lambda = 0.95
+clip_coef = 0.2
+ent_coef = 0.01
+vf_coef = 0.5
+max_grad_norm = 0.5
+target_kl = 0.015
+update_epochs = 4
+batch_size = 1024
+stacked_frames = 4
+boid_hidden_size = 128
+predator_hidden_size = 256
+critic_hidden_size = 512
+checkpoint_interval = 500
+compile_models = true
+compile_env = true
+wandb_project = "murmur_rl"
+wandb_run_name = "co-evolution run 2"
+
+[evaluation]
+num_episodes = 3
+episode_steps = 500
+render_frames = 1800
+seed_offset = 1000
+
+[metrics]
+distance_graph_radius = 15.0
+fringe_radius_fraction = 0.9
+histogram_bins = 20
