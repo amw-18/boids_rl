@@ -36,8 +36,13 @@ class VectorMurmurationEnv:
         dt=0.1,
         device="cpu",
         gamma=0.99,
+        boundary_mode="legacy_pbrs",
         pbrs_k=1.0,
         pbrs_c=1.0,
+        wall_soft_margin=0.0,
+        wall_penalty=0.0,
+        predator_wall_penalty=0.0,
+        wall_bounce_damping=1.0,
         max_steps=500,
         curriculum_enabled=True,
         predator_catch_radius_start=2.0,
@@ -54,8 +59,12 @@ class VectorMurmurationEnv:
         collision_penalty=2.0,
         death_penalty=-100.0,
         predator_catch_reward=10.0,
+        predator_team_catch_reward=0.0,
         predator_hunger_penalty=-0.05,
     ):
+        if boundary_mode not in {"legacy_pbrs", "hard_walls"}:
+            raise ValueError(f"Unsupported boundary_mode: {boundary_mode}")
+
         self.n_agents = num_agents
         self.num_predators = num_predators
         self.space_size = space_size
@@ -80,6 +89,8 @@ class VectorMurmurationEnv:
             predator_sprint_drain=predator_sprint_drain,
             predator_recovery_rate=predator_recovery_rate,
             predator_cooldown_duration=predator_cooldown_duration,
+            enforce_hard_walls=(boundary_mode == "hard_walls"),
+            wall_bounce_damping=wall_bounce_damping,
         )
 
         self.obs_dim = 18
@@ -93,6 +104,7 @@ class VectorMurmurationEnv:
         self.num_moves = 0
         self.env_step_counter = 0
         self.max_steps = max_steps
+        self.boundary_mode = boundary_mode
         self.curriculum_enabled = curriculum_enabled
         self.predator_catch_radius_start = predator_catch_radius_start
         self.predator_catch_radius_end = predator_catch_radius_end
@@ -100,7 +112,11 @@ class VectorMurmurationEnv:
         self.predator_visual_noise_variance = predator_visual_noise_variance
         self.survival_reward = survival_reward
         self.collision_penalty = collision_penalty
+        self.wall_soft_margin = wall_soft_margin
+        self.wall_penalty = wall_penalty
+        self.predator_wall_penalty = predator_wall_penalty
         self.predator_catch_reward = predator_catch_reward
+        self.predator_team_catch_reward = predator_team_catch_reward
         self.predator_hunger_penalty = predator_hunger_penalty
 
         # Pre-compute constants as on-device tensors so compiled code
@@ -110,7 +126,11 @@ class VectorMurmurationEnv:
         self._death_penalty = torch.tensor(death_penalty, device=self.device)
         self._survival_reward = torch.tensor(survival_reward, device=self.device)
         self._collision_penalty = torch.tensor(collision_penalty, device=self.device)
+        self._wall_soft_margin = torch.tensor(max(wall_soft_margin, 0.0), device=self.device)
+        self._wall_penalty = torch.tensor(wall_penalty, device=self.device)
+        self._predator_wall_penalty = torch.tensor(predator_wall_penalty, device=self.device)
         self._predator_catch_reward = torch.tensor(predator_catch_reward, device=self.device)
+        self._predator_team_catch_reward = torch.tensor(predator_team_catch_reward, device=self.device)
         self._predator_hunger_penalty = torch.tensor(predator_hunger_penalty, device=self.device)
         self._zero = torch.tensor(0.0, device=self.device)
         self._inf = torch.tensor(float("inf"), device=self.device)
@@ -194,21 +214,29 @@ class VectorMurmurationEnv:
         obs_preds = self._get_predator_observations()
         rewards_boids, rewards_preds, new_deaths, new_potential, new_pred_potential = self._get_rewards()
 
+        episode_over = torch.all(self._dead_mask | new_deaths)
+        truncated = self.num_moves >= self.max_steps
+        if episode_over or truncated:
+            effective_new_potential = torch.zeros_like(new_potential)
+            effective_new_pred_potential = torch.zeros_like(new_pred_potential)
+        else:
+            effective_new_potential = new_potential
+            effective_new_pred_potential = new_pred_potential
+
         # PBRS shaping for Boids
-        shaping = (self._gamma * new_potential) - self.last_potential
+        shaping = (self._gamma * effective_new_potential) - self.last_potential
         rewards_boids += shaping
-        self.last_potential = new_potential.clone()
+        self.last_potential = effective_new_potential.clone()
 
         # PBRS shaping for Predators
-        pred_shaping = (self._gamma * new_pred_potential) - self.last_pred_potential
+        pred_shaping = (self._gamma * effective_new_pred_potential) - self.last_pred_potential
         rewards_preds += pred_shaping
-        self.last_pred_potential = new_pred_potential.clone()
+        self.last_pred_potential = effective_new_pred_potential.clone()
 
         # Update persistent death mask
         self._dead_mask |= new_deaths
 
         # Truncation
-        truncated = self.num_moves >= self.max_steps
         if truncated:
             dones = torch.ones(self.n_agents, dtype=torch.bool, device=self.device)
         else:
@@ -337,6 +365,16 @@ class VectorMurmurationEnv:
         self._step_cache = self._build_step_cache()
         self._step_cache_signature = signature
         return self._step_cache
+
+    def _wall_pressure(self, positions: torch.Tensor) -> torch.Tensor:
+        if self._wall_soft_margin.item() <= 0.0:
+            return torch.zeros(positions.shape[0], device=self.device, dtype=positions.dtype)
+
+        distance_to_low = positions
+        distance_to_high = self.space_size - positions
+        nearest_wall = torch.minimum(distance_to_low, distance_to_high).min(dim=1).values
+        penetration = ((self._wall_soft_margin - nearest_wall) / self._wall_soft_margin).clamp(min=0.0, max=1.0)
+        return penetration.square()
 
     # ------------------------------------------------------------------
     # Vectorized observations — zero Python loops
@@ -593,9 +631,12 @@ class VectorMurmurationEnv:
         # Potential-Based Reward Shaping (PBRS)
         
         # 1. Boundary Potential (phi_bounds)
-        pos_relative = (pos - self._half_space) / self._half_space
-        d_center_sq = (pos_relative**2).sum(dim=-1)
-        phi_bounds = -self._pbrs_k * d_center_sq
+        if self.boundary_mode == "legacy_pbrs":
+            pos_relative = (pos - self._half_space) / self._half_space
+            d_center_sq = (pos_relative**2).sum(dim=-1)
+            phi_bounds = -self._pbrs_k * d_center_sq
+        else:
+            phi_bounds = torch.zeros(self.n_agents, device=self.device)
         
         # 2. Density Potential (phi_density) — must mask dead agents like PZ env
         local_density = (live_dist_matrix < self.perception_radius).float().sum(dim=1) / self.n_agents
@@ -609,6 +650,8 @@ class VectorMurmurationEnv:
 
         # Collision penalty
         rewards -= self._collision_penalty * collision_count
+        if self.boundary_mode == "hard_walls" and self._wall_penalty.item() > 0.0:
+            rewards -= self._wall_penalty * self._wall_pressure(pos)
 
         # Death penalty overrides everything
         rewards = torch.where(new_deaths, self._death_penalty, rewards)
@@ -621,15 +664,20 @@ class VectorMurmurationEnv:
 
         # Predator Rewards with PBRS boundary potential
         pred_pos = self.physics.predator_position  # (P, 3)
-        pred_pos_relative = (pred_pos - self._half_space) / self._half_space
-        pred_d_center_sq = (pred_pos_relative**2).sum(dim=-1)  # (P,)
-        pred_phi_bounds = -self._pbrs_k * pred_d_center_sq  # (P,)
+        if self.boundary_mode == "legacy_pbrs":
+            pred_pos_relative = (pred_pos - self._half_space) / self._half_space
+            pred_d_center_sq = (pred_pos_relative**2).sum(dim=-1)  # (P,)
+            pred_phi_bounds = -self._pbrs_k * pred_d_center_sq  # (P,)
+        else:
+            pred_phi_bounds = torch.zeros(self.num_predators, device=self.device)
 
         rewards_preds = torch.zeros(self.num_predators, device=self.device)
 
         # Catch reward: +10.0 per boid caught this step
         catches_per_pred = self.physics.last_capture_counts
         rewards_preds += self._predator_catch_reward * catches_per_pred
+        if self._predator_team_catch_reward.item() != 0.0:
+            rewards_preds += self._predator_team_catch_reward * catches_per_pred.sum()
 
         # Hunger penalty: constant penalty per step to encourage quick catches
         is_cooldown = self.physics.predator_cooldown > 0
@@ -639,6 +687,8 @@ class VectorMurmurationEnv:
             self._predator_hunger_penalty,
             self._zero
         )
+        if self.boundary_mode == "hard_walls" and self._predator_wall_penalty.item() > 0.0:
+            rewards_preds -= self._predator_wall_penalty * self._wall_pressure(pred_pos)
 
         return rewards, rewards_preds, new_deaths, new_potential, pred_phi_bounds
 

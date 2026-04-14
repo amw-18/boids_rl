@@ -7,7 +7,7 @@ import tomllib
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_STUDY_CONFIG = REPO_ROOT / "configs" / "studies" / "v1_shaped_current.toml"
+DEFAULT_STUDY_CONFIG = REPO_ROOT / "configs" / "studies" / "v2_hard_walls.toml"
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
@@ -53,8 +53,13 @@ class EnvironmentConfig:
     dt: float = 0.1
     max_steps: int = 500
     gamma: float = 0.99
+    boundary_mode: str = "legacy_pbrs"
     pbrs_k: float = 1.0
     pbrs_c: float = 1.0
+    wall_soft_margin: float = 0.0
+    wall_penalty: float = 0.0
+    predator_wall_penalty: float = 0.0
+    wall_bounce_damping: float = 1.0
     curriculum_enabled: bool = True
     predator_catch_radius_start: float = 2.0
     predator_catch_radius_end: float = 0.5
@@ -70,6 +75,7 @@ class EnvironmentConfig:
     collision_penalty: float = 2.0
     death_penalty: float = -100.0
     predator_catch_reward: float = 10.0
+    predator_team_catch_reward: float = 0.0
     predator_hunger_penalty: float = -0.05
 
 
@@ -83,6 +89,8 @@ class TrainingConfig:
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
     ent_coef: float = 0.01
+    entropy_final_coef: float = 0.0
+    entropy_anneal_epochs: int = 1000
     vf_coef: float = 0.5
     max_grad_norm: float = 0.5
     target_kl: float = 0.015

@@ -198,8 +198,11 @@ def main() -> None:
             mean_local_density_norm = boid_rollouts["obs"][:, :, col_local_density].mean().item()
             actual_social_neighbors = mean_local_density_norm * study_config.environment.num_agents
 
-            progress = min(1.0, (epoch - 1) / 1000.0)
-            trainer.ent_coef = study_config.training.ent_coef * (1.0 - progress)
+            anneal_epochs = max(1, study_config.training.entropy_anneal_epochs)
+            progress = min(1.0, (epoch - 1) / float(anneal_epochs))
+            start_ent = study_config.training.ent_coef
+            end_ent = study_config.training.entropy_final_coef
+            trainer.ent_coef = start_ent + ((end_ent - start_ent) * progress)
             metrics = trainer.train_step(boid_rollouts, pred_rollouts)
 
             if use_wandb:

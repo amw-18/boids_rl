@@ -25,6 +25,8 @@ class BoidsPhysics:
         predator_sprint_drain: float = 1.0,
         predator_recovery_rate: float = 0.5,
         predator_cooldown_duration: int = 50,
+        enforce_hard_walls: bool = False,
+        wall_bounce_damping: float = 1.0,
     ):
         self.num_boids = num_boids
         self.num_predators = num_predators
@@ -44,6 +46,8 @@ class BoidsPhysics:
             max_force=max_force,
         )
         self.predator_catch_radius = predator_catch_radius
+        self.enforce_hard_walls = enforce_hard_walls
+        self.wall_bounce_damping = wall_bounce_damping
         
         # Co-Evolution Parameters: Stamina Economy
         self.predator_max_stamina = predator_max_stamina # total sprint capacity
@@ -82,6 +86,19 @@ class BoidsPhysics:
         self.last_capture_mask.zero_()
         self.last_capture_predators.fill_(-1)
         self.last_capture_counts.zero_()
+
+    def _apply_hard_walls(self, positions: torch.Tensor, velocities: torch.Tensor) -> None:
+        if not self.enforce_hard_walls:
+            return
+
+        lower_hits = positions < 0.0
+        upper_hits = positions > self.space_size
+        hits = lower_hits | upper_hits
+        if not hits.any():
+            return
+
+        positions.clamp_(min=0.0, max=self.space_size)
+        velocities.copy_(torch.where(hits, -velocities * self.wall_bounce_damping, velocities))
         
     def reset(self):
         """Randomly initialize positions and velocities."""
@@ -208,7 +225,8 @@ class BoidsPhysics:
         
         # Update positions
         self.positions += self.velocities * self.dt
-        
+        self._apply_hard_walls(self.positions, self.velocities)
+
         # === PREDATOR PHYSICS ===
         self._update_predator(predator_actions)
         self._check_captures()
@@ -280,9 +298,10 @@ class BoidsPhysics:
         
         # Inertia blending for smooth speed transitions
         new_speed = speed * 0.9 + target_speed * 0.1
-        
+
         self.predator_velocity = forward_new * new_speed
         self.predator_position += self.predator_velocity * self.dt
+        self._apply_hard_walls(self.predator_position, self.predator_velocity)
         
     def _check_captures(self):
         """Mark alive boids as dead if touched and assign the catch to a single predator."""
